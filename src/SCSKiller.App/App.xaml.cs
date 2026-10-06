@@ -258,10 +258,20 @@ public partial class App : Application
 
     /// <summary>A question with Cancel and one action; true = the action was chosen.</summary>
     public static async Task<bool> ConfirmAsync(Page page, string title, object content, string primaryText, ContentDialogButton defaultButton = ContentDialogButton.Close) =>
-        await new ContentDialog
-        {
-            XamlRoot = page.XamlRoot, Title = title, Content = content, PrimaryButtonText = primaryText, CloseButtonText = "Cancel", DefaultButton = defaultButton,
-        }.ShowAsync() == ContentDialogResult.Primary;
+        await ShowAsync(Confirm(page, title, content, primaryText, defaultButton)) == ContentDialogResult.Primary;
+
+    public static ContentDialog Confirm(Page page, string title, object content, string primaryText, ContentDialogButton defaultButton = ContentDialogButton.Close) => new()
+    {
+        XamlRoot = page.XamlRoot, Title = title, Content = content, PrimaryButtonText = primaryText, CloseButtonText = "Cancel", DefaultButton = defaultButton,
+    };
+
+    /// <summary>None when another dialog is open: WinUI shows one at a time and throws, which an async void
+    /// handler can't survive.</summary>
+    public static async Task<ContentDialogResult> ShowAsync(ContentDialog dialog)
+    {
+        try { return await dialog.ShowAsync(); }
+        catch (COMException) { return ContentDialogResult.None; }
+    }
 
     /// <summary>The welcome's sign-in button: starts the browser flow and shows Settings, whose Account card follows it.</summary>
     public static void SignInWithPatreon()

@@ -124,6 +124,126 @@ public class UpdateTests : IDisposable
     }
 
     [Fact]
+    public void A_staged_download_installs_only_while_its_channel_is_chosen()
+    {
+        Assert.True(UpdateChannels.Installs("internal", "internal", "internal", ["internal"]));
+        Assert.False(UpdateChannels.Installs("internal", "internal", "internal", ["db"]));      // lapsed: the token says so
+        Assert.True(UpdateChannels.Installs("stable", "beta", "stable", []));                   // signed out: stable
+        Assert.False(UpdateChannels.Installs("beta", "beta", "stable", []));
+        // signed in, no token read yet (a logon without network): any channel up to the chosen one
+        Assert.True(UpdateChannels.Installs("internal", "internal", "internal", null));
+        Assert.True(UpdateChannels.Installs("stable", "internal", "internal", null));
+        Assert.True(UpdateChannels.Installs("stable", null, "beta", null));
+        Assert.False(UpdateChannels.Installs("alpha", "beta", "beta", null));                   // switched to an earlier channel
+        Assert.False(UpdateChannels.Installs("internal", "stable", "internal", null));
+    }
+
+    static readonly byte[] StableFeed = """{"Assets":[{"PackageId":"SCSKiller.App","Version":"1.2.4","Type":"Full","FileName":"SCSKiller.App-1.2.4-stable-full.nupkg","SHA256":"AB12","Size":124642678}]}"""u8.ToArray();
+    static readonly byte[] BetaFeed = """{"Assets":[{"PackageId":"SCSKiller.App","Version":"1.3.0-beta.1","Type":"Full","FileName":"SCSKiller.App-1.3.0-beta.1-beta-full.nupkg","SHA256":"CD34","Size":124000000}]}"""u8.ToArray();
+    static readonly StagedUpdate Staged = new("stable", "1.2.4", "SCSKiller.App-1.2.4-stable-full.nupkg", 124_642_678, "ab12",
+        new Dictionary<string, SignedFeed> { ["stable"] = new(StableFeed, Sig(A.Seed, "rel-a", "stable", StableFeed, T)) });
+    static readonly StagedUpdate StagedBeta = new("beta", "1.3.0-beta.1", "SCSKiller.App-1.3.0-beta.1-beta-full.nupkg", 124_000_000, "cd34",
+        new Dictionary<string, SignedFeed> { ["beta"] = new(BetaFeed, Sig(A.Seed, "rel-a", "beta", BetaFeed, T)), ["stable"] = Staged.Feeds["stable"] });
+    static readonly Dictionary<string, string> Keys = new() { ["rel-a"] = A.Public };
+
+    [Fact]
+    public void A_staged_download_survives_the_restart()
+    {
+        Assert.Null(StagedUpdate.Load(_dir));
+        Staged.Save(_dir);
+        var loaded = StagedUpdate.Load(_dir)!;
+        Assert.Equal((Staged.Channel, Staged.Version, Staged.FileName, Staged.Size, Staged.Sha256), (loaded.Channel, loaded.Version, loaded.FileName, loaded.Size, loaded.Sha256));
+        Assert.Null(loaded.Refused(Keys));   // the feed and its signature, byte for byte
+        File.WriteAllText(Path.Combine(_dir, "update-staged.json"), "{\"Channel\":\"stable\"");   // torn write
+        Assert.Null(StagedUpdate.Load(_dir));
+        File.WriteAllText(Path.Combine(_dir, "update-staged.json"), "{}");
+        Assert.Null(StagedUpdate.Load(_dir));
+        Staged.Save(_dir);
+        StagedUpdate.Forget(_dir);
+        Assert.Null(StagedUpdate.Load(_dir));
+        StagedUpdate.Forget(_dir);   // nothing to forget
+    }
+
+    [Fact]
+    public void A_staged_record_its_signed_feeds_dont_back_is_refused()
+    {
+        Assert.Null(Staged.Refused(Keys));
+        Assert.Null(StagedBeta.Refused(Keys));
+        Assert.Null((StagedBeta with { Channel = "internal" }).Refused(Keys));   // internal's check reads beta's and stable's feeds
+        // the record says stable but holds only a beta feed: a beta package passed off as stable
+        Assert.NotNull((Staged with { Version = StagedBeta.Version, FileName = StagedBeta.FileName, Size = StagedBeta.Size, Sha256 = StagedBeta.Sha256,
+            Feeds = new Dictionary<string, SignedFeed> { ["beta"] = StagedBeta.Feeds["beta"] } }).Refused(Keys));
+        Assert.NotNull((StagedBeta with { Channel = "stable" }).Refused(Keys));
+        Assert.NotNull((Staged with { Sha256 = "ef56" }).Refused(Keys));      // another package's hash
+        Assert.NotNull((Staged with { Size = 1 }).Refused(Keys));
+        Assert.NotNull((Staged with { Version = "1.9.0" }).Refused(Keys));
+        Assert.NotNull((Staged with { FileName = "other.nupkg" }).Refused(Keys));
+        Assert.NotNull((Staged with { Channel = "nonsense" }).Refused(Keys));
+        Assert.NotNull((Staged with { Feeds = new Dictionary<string, SignedFeed>() }).Refused(Keys));
+        var edited = StableFeed.ToArray();
+        edited[^5] = (byte)'9';   // the size in the feed, after it was signed
+        Assert.NotNull((Staged with { Feeds = new Dictionary<string, SignedFeed> { ["stable"] = Staged.Feeds["stable"] with { Feed = edited } } }).Refused(Keys));
+        Assert.NotNull((Staged with { Feeds = new Dictionary<string, SignedFeed> { ["stable"] = new(BetaFeed, StagedBeta.Feeds["beta"].Sig) } }).Refused(Keys));   // beta's signature under stable
+        Assert.NotNull(Staged.Refused(new Dictionary<string, string> { ["rel-b"] = B.Public }));   // a key that isn't pinned
+    }
+
+    [Fact]
+    public void The_start_applies_a_staged_update()
+    {
+        Staged.Save(_dir);
+        var staged = StagedUpdate.Load(_dir)!;
+        Assert.Equal(StartStep.Apply, staged.AtStart(AppVersion.Parse("1.2.3")!, handedOver: false));
+        Assert.Null(AutoInstall.HeldBack(AppStore.DefaultSettings, compiling: false, offline: false, playing: false));
+        Assert.Equal(StartStep.Installed, staged.AtStart(AppVersion.Parse("1.2.4")!, handedOver: true));   // the hook didn't clear the marker
+        Assert.Equal(StartStep.Failed, staged.AtStart(AppVersion.Parse("1.2.3")!, handedOver: true));      // never a restart loop
+        Assert.Equal(StartStep.Older, staged.AtStart(AppVersion.Parse("1.3.0")!, handedOver: false));
+        Assert.Equal(StartStep.Apply, (staged with { Channel = "internal", Version = "1.2.4-internal.1" }).AtStart(AppVersion.Parse("1.2.4")!, false));
+    }
+
+    [Fact]
+    public void Automatic_install_is_on_by_default_also_for_an_older_settings_file()
+    {
+        Assert.True(AppStore.DefaultSettings.InstallUpdatesAutomatically);
+        var store = new AppStore(_dir);
+        store.SaveSettings(AppStore.DefaultSettings with { StartWithWindows = false });
+        var file = Path.Combine(_dir, "settings.json");
+        var json = JsonNode.Parse(File.ReadAllText(file))!.AsObject();
+        Assert.True(json.Remove("InstallUpdatesAutomatically"));
+        File.WriteAllText(file, json.ToJsonString());
+        Assert.True(store.LoadSettings().InstallUpdatesAutomatically);
+        Assert.False(store.LoadSettings().StartWithWindows);
+    }
+
+    [Fact]
+    public void Nothing_installs_by_itself_with_the_setting_off()
+    {
+        var off = AppStore.DefaultSettings with { InstallUpdatesAutomatically = false };
+        Assert.Equal(AutoInstall.Off, AutoInstall.HeldBack(off, false, false, false));
+        Assert.DoesNotContain("starts or quits", AutoInstall.ReadyNote("1.2.4", off));
+    }
+
+    [Fact]
+    public void A_compile_an_offline_session_or_a_game_holds_the_install_back()
+    {
+        var on = AppStore.DefaultSettings;
+        Assert.Equal(AutoInstall.Compiling, AutoInstall.HeldBack(on, compiling: true, offline: false, playing: false));
+        Assert.Equal(AutoInstall.Offline, AutoInstall.HeldBack(on, compiling: false, offline: true, playing: false));
+        Assert.Equal(AutoInstall.Playing, AutoInstall.HeldBack(on, compiling: false, offline: false, playing: true));
+    }
+
+    [Fact]
+    public void Restart_to_update_is_offered_for_a_staged_update_with_automatic_install_on_or_off()
+    {
+        foreach (var s in new[] { AppStore.DefaultSettings, AppStore.DefaultSettings with { InstallUpdatesAutomatically = false } })
+        {
+            Assert.True(AutoInstall.OffersRestart(Staged, s.UpdateChannel, "stable", []));
+            Assert.Contains("Restart to update", AutoInstall.ReadyNote("1.2.4", s));
+        }
+        Assert.Contains("starts or quits", AutoInstall.ReadyNote("1.2.4", AppStore.DefaultSettings));
+        Assert.False(AutoInstall.OffersRestart(null, null, "stable", []));
+    }
+
+    [Fact]
     public async Task BusyMutex_GuardsTheApply()
     {
         var name = @"Local\SCSKiller.Busy.test-" + Guid.NewGuid().ToString("N");   // not the real one: queue tests may hold it
@@ -207,18 +327,49 @@ public class UpdateTests : IDisposable
     public void Checks_RunHourly() => Assert.Equal(TimeSpan.FromHours(1), UpdateFeeds.CheckEvery);
 
     /// <summary>The App project is WinUI and has no test seam: its source says that "Check for updates" and the Library's
-    /// refresh download what they find (CheckAsync's download defaults to true).</summary>
+    /// refresh download what they find.</summary>
     [Fact]
     public void ManualCheck_AndLibraryRefresh_Download()
     {
         var app = Path.Combine(TestEnv.RepoRoot, "src", "SCSKiller.App");
         var updater = File.ReadAllText(Path.Combine(app, "Updater.cs"));
-        Assert.Matches(@"public static async Task CheckAsync\(bool backToStable = false, bool download = true\)", updater);
+        Assert.Matches(@"public static async Task CheckAsync\(bool backToStable = false\)", updater);
         var now = System.Text.RegularExpressions.Regex.Match(updater, @"public static Task CheckNowAsync\(\)\s*\{(.*?)\r?\n    \}",System.Text.RegularExpressions.RegexOptions.Singleline);
         Assert.True(now.Success);
         Assert.Contains("return CheckAsync();", now.Groups[1].Value);
         Assert.Contains("_ = Updater.CheckNowAsync();", File.ReadAllText(Path.Combine(app, "Pages", "AboutPage.xaml.cs")));
         Assert.Matches(@"real\.UserFetch = async \(\) => \{ await Account\.RefreshAsync\(\); await Updater\.CheckAsync\(\); \};", File.ReadAllText(Path.Combine(app, "App.xaml.cs")));
+    }
+
+    /// <summary>The App's source: the start and the tray's Quit both ask <see cref="AutoInstall.HeldBack"/> before applying,
+    /// the start takes the staged download from the disk, and Windows' session end never applies.</summary>
+    [Fact]
+    public void Start_and_Quit_apply_only_through_the_automatic_install_rules()
+    {
+        var app = Path.Combine(TestEnv.RepoRoot, "src", "SCSKiller.App");
+        var updater = File.ReadAllText(Path.Combine(app, "Updater.cs"));
+        string Body(string signature) => System.Text.RegularExpressions.Regex.Match(updater, System.Text.RegularExpressions.Regex.Escape(signature) + @"\s*\{(.*?)\r?\n    \}",
+            System.Text.RegularExpressions.RegexOptions.Singleline) is { Success: true } m ? m.Groups[1].Value : throw new Xunit.Sdk.XunitException(signature);
+        var start = Body("public static async Task ApplyAtStartAsync(string[] args)");
+        Assert.Contains("Staged()", start);
+        Assert.Contains("case StartStep.Apply: ready = d;", start);
+        Assert.Matches(@"HeldBack\(\) is null && BeginUpdate\(\)\s*&& !await ApplyAsync\(TimeSpan\.Zero, \(m, a\) => m\.ApplyUpdatesAndRestart\(a, args\)", start);
+        var quit = Body("public static async Task ApplyOnExitAsync()");
+        Assert.True(quit.IndexOf("HeldBack()") is >= 0 and var held && held < quit.IndexOf("ApplyAsync("));
+        // a game started during Quit's wait for the check is seen right before the handover
+        Assert.Contains("m.WaitExitThenApplyUpdates(r, silent: true, restart: false), () => !GameRunning())", quit);
+        Assert.Contains("static bool GameRunning() => App.Core is ScsKiller k ? k.GameRunning()", updater);
+        // the start scans whether or not a game is known to run: before its scan, GameRunning() can only say "maybe"
+        Assert.Matches(@"Untouched\(\) && App\.Core\.Settings\.InstallUpdatesAutomatically\) await App\.Core\.ScanAsync\(", start);
+        Assert.Contains("AutoInstall.HeldBack(App.Core.Settings, Busy.IsHeld() || App.Core.Compiling, OfflineBlocks(), GameRunning())", updater);
+        // the start knows the games before it asks whether one runs, and asks again right before the handover
+        Assert.True(start.IndexOf("await App.Core.ScanAsync(") is >= 0 and var scan && scan < start.IndexOf("BeginUpdate()"));
+        Assert.Contains("() => Untouched() && !GameRunning()", start);
+        Assert.Contains("s.Refused(FeedTrust.ReleaseKeys)", updater);
+        Assert.Contains(".SetAutoApplyOnStartup(false)", updater);
+        Assert.Contains("if (ready?.Channel == channel && !SignedFeedSource.Partial) Stage(null);", updater);   // a feed missing a channel drops nothing
+        var appXaml = File.ReadAllText(Path.Combine(app, "App.xaml.cs"));
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(appXaml, @"Updater\.ApplyOnExitAsync\("));   // QuitAsync only, not SessionEnd
     }
 
     /// <summary>A package host can't fill the disk past the signed feed's size, nor hold the update check forever.</summary>
@@ -230,6 +381,114 @@ public class UpdateTests : IDisposable
         Assert.Equal(1000, to.Length);
         await Assert.ThrowsAsync<FeedRejectedException>(() => UpdateFeeds.Download(new MemoryStream(new byte[1001]), new MemoryStream(), 1000, TimeSpan.FromSeconds(5), default));
         await Assert.ThrowsAsync<TimeoutException>(() => UpdateFeeds.Download(new Stalling(), new MemoryStream(), 1000, TimeSpan.FromMilliseconds(200), default));
+    }
+
+    static readonly byte[] InternalFeed = """{"Assets":[{"PackageId":"SCSKiller.App","Version":"1.2.3-internal.5","Type":"Full","FileName":"SCSKiller.App-1.2.3-internal.5-internal-full.nupkg","SHA256":"EF56","Size":4}]}"""u8.ToArray();
+    const string InternalPackage = "SCSKiller.App-1.2.3-internal.5-internal-full.nupkg";
+
+    /// <summary>The servers by host and path: 404 for anything not given, 429 (Retry-After an hour) for a limited host.</summary>
+    sealed class Servers(Dictionary<string, byte[]> files, params string[] limited) : HttpMessageHandler
+    {
+        public readonly List<Uri> Asked = [];
+        public int To(string host) => Asked.Count(u => u.Host == host);
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var url = request.RequestUri!;
+            lock (Asked) Asked.Add(url);
+            if (url.Host != "github.com") Assert.Equal("tok", request.Headers.Authorization?.Parameter);
+            if (limited.Contains(url.Host))
+            {
+                var r = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+                r.Headers.RetryAfter = new(TimeSpan.FromHours(1));
+                return Task.FromResult(r);
+            }
+            var file = files.FirstOrDefault(f => url.AbsolutePath.EndsWith("/" + f.Key)).Value;
+            return Task.FromResult(file is null ? new HttpResponseMessage(System.Net.HttpStatusCode.NotFound) : new HttpResponseMessage { Content = new ByteArrayContent(file) });
+        }
+    }
+
+    static Dictionary<string, byte[]> Signed(string channel, byte[] feed, string seed = "") => new()
+    {
+        [$"releases.{channel}.json"] = feed,
+        [$"releases.{channel}.json.sig"] = Sig(seed.Length > 0 ? seed : A.Seed, "rel-a", channel, feed, T),
+    };
+
+    FeedClient Client(Servers s, List<string>? log = null) => new(s, Trust(), () => Task.FromResult<string?>("tok"), l => log?.Add(l));
+
+    /// <summary>GitHub limiting the stable feed holds back neither the internal feed nor the internal package: the newer
+    /// internal build is still read and downloaded, and GitHub isn't asked again before its Retry-After.</summary>
+    [Fact]
+    public async Task A_rate_limited_stable_feed_doesnt_hold_back_a_newer_internal_package()
+    {
+        var files = Signed("internal", InternalFeed);
+        files[InternalPackage] = [1, 2, 3, 4];
+        var s = new Servers(files, "github.com");
+        var log = new List<string>();
+        var c = Client(s, log);
+        for (var i = 0; i < 2; i++)
+        {
+            var (feeds, partial) = await c.ReadAsync("internal");
+            Assert.Equal(["internal"], feeds.Select(f => f.Channel));
+            Assert.Equal(InternalFeed, feeds[0].Feed.Feed);
+            Assert.True(partial);   // stable left out: a staged download it lists isn't dropped
+        }
+        Assert.Equal(1, s.To("github.com"));
+        const string channel = "internal";
+        Assert.Equal(4, s.Asked.Count(u => u.AbsolutePath.EndsWith($"releases.{channel}.json") || u.AbsolutePath.EndsWith($"releases.{channel}.json.sig")));
+        Assert.Contains(log, l => l.Contains("github.com"));
+        using var package = await c.PackageAsync(AppVersion.Parse("1.2.3-internal.5")!, InternalPackage, default);
+        Assert.Equal([1, 2, 3, 4], await package.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task A_rate_limited_stable_feed_waits_on_the_stable_channel()
+    {
+        var s = new Servers([], "github.com");
+        var c = Client(s);
+        for (var i = 0; i < 2; i++)
+            Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, (await Assert.ThrowsAsync<HttpRequestException>(() => c.ReadAsync("stable"))).StatusCode);
+        var e = await Assert.ThrowsAsync<HttpRequestException>(() => c.PackageAsync(AppVersion.Parse("1.2.4")!, "SCSKiller.App-1.2.4-stable-full.nupkg", default));
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, e.StatusCode);
+        Assert.Equal(1, s.To("github.com"));   // the second read and the package waited without asking
+    }
+
+    [Fact]
+    public async Task A_limited_package_host_doesnt_stop_the_feeds()
+    {
+        if (Environment.GetEnvironmentVariable("SCSKILLER_API") is { Length: > 0 }) return;   // packages then share the API host
+        var s = new Servers(Signed("internal", InternalFeed), "dl.scskiller.io");
+        var c = Client(s);
+        for (var i = 0; i < 2; i++)
+        {
+            var e = await Assert.ThrowsAsync<HttpRequestException>(() => c.PackageAsync(AppVersion.Parse("1.2.3-internal.5")!, InternalPackage, default));
+            Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, e.StatusCode);
+        }
+        Assert.Equal(1, s.To("dl.scskiller.io"));
+        Assert.Single((await c.ReadAsync("internal")).Feeds);
+    }
+
+    [Fact]
+    public async Task The_signature_is_still_required_beside_a_rate_limited_feed()
+    {
+        var other = FeedTrust.NewKey();
+        await Assert.ThrowsAsync<FeedRejectedException>(() => Client(new Servers(Signed("internal", InternalFeed, other.Seed), "github.com")).ReadAsync("internal"));
+        // a later channel's feed that fails its signature fails the read too
+        var files = Signed("internal", InternalFeed);
+        foreach (var (k, v) in Signed("stable", StableFeed, other.Seed)) files[k] = v;
+        await Assert.ThrowsAsync<FeedRejectedException>(() => Client(new Servers(files)).ReadAsync("internal"));
+    }
+
+    /// <summary>beta and alpha unpublished (404) are channels without a feed, not feeds left out.</summary>
+    [Fact]
+    public async Task Unpublished_channels_are_no_feed_rather_than_a_gap()
+    {
+        var files = Signed("internal", InternalFeed);
+        foreach (var (k, v) in Signed("stable", StableFeed)) files[k] = v;
+        var (feeds, partial) = await Client(new Servers(files)).ReadAsync("internal");
+        Assert.Equal(["internal", "stable"], feeds.Select(f => f.Channel));
+        Assert.False(partial);
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, (await Assert.ThrowsAsync<HttpRequestException>(() => Client(new Servers([])).ReadAsync("stable"))).StatusCode);
+        Assert.Empty((await Client(new Servers([])).ReadAsync("beta")).Feeds);   // none yet on its own channel
     }
 
     /// <summary>Some bytes, then nothing until cancelled.</summary>

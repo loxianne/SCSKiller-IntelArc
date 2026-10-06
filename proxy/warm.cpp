@@ -8,6 +8,7 @@
 //                  [--memory-mb N] [--package <app user model id>] [--stage-path <install folder>\<dir>\<exe>]
 //                  [--skip-keys <sha1 hex>,...] [--isolate i,j,...]
 //                  [--ags <amd_ags_x64.dll> --ags-app <name> --ags-engine <name>] [--pass K] [--layer <folder>]
+//                  [--d3d12 <the game's Agility SDK folder>]
 //
 // Protocol (JSON lines on stdout, exit codes): ARCHITECTURE.md. Stages <workdir>\stage-<pid>-<n>\<exe name> (a new folder
 // of this run's) + d3d12.dll (the proxy) + the dbs and runs that copy (the child), which prints the JSON. The caller only
@@ -19,7 +20,11 @@
 // proxy's outputs are moved up to the staging folder and the rest of that tree is removed. --ags: the child creates its
 // device through that AGS 6 DLL, registering the game's app and engine names, since AMD keys the cache of such a device
 // on the app name; if that fails it says why on stderr and creates a plain device. --pass K: <workdir>\scskiller_pass.bin
-// holds each item's pass (one byte per item); only pass K's items are created, the others count as done.
+// holds each item's pass (one byte per item); only pass K's items are created, the others count as done. --d3d12: its
+// Agility SDK DLLs are staged in D3D12\ next to the exe and the child asks the D3D12 loader for that runtime (the exports
+// below), as the game does, so a recording made on it replays where the system's runtime is older (Windows 10's has no
+// SM 6.6 and none of the newer pipeline subobjects). The loader takes the system's when that one is as new. A failed
+// staging runs on the system's, and so does a child whose device the game's runtime didn't make (run again).
 #define NOMINMAX
 #include <windows.h>
 #include <d3d12.h>
@@ -38,6 +43,9 @@
 #pragma comment(lib, "ole32.lib")
 
 extern "C" __declspec(dllexport) const int SCSKiller_WarmHost = 1;  // the proxy warms only in a process exporting it
+// Read by the system d3d12.dll when the proxy loads it. 0 (no --d3d12) is older than any system runtime: the system's.
+extern "C" __declspec(dllexport) UINT D3D12SDKVersion = 0;
+extern "C" __declspec(dllexport) const char* D3D12SDKPath = ".\\D3D12\\";
 
 // What Invoke-CommandInDesktopPackage uses (Microsoft.Windows.Appx.PackageManager.Commands.dll).
 struct __declspec(uuid("F158268A-D5A5-45CE-99CF-00D6C3F3FC0A")) IDesktopAppXActivator : IUnknown {
@@ -55,6 +63,9 @@ static std::wstring started_name(DWORD parent) { return L"Local\\SCSKiller.Start
 static std::wstring pipe_name(DWORD parent, int fd) { return L"\\\\.\\pipe\\SCSKiller.Warm." + std::to_wstring(parent) + L"." + std::to_wstring(fd); }
 
 enum { RUN, PAUSE, STOP };  // SCSKiller_Control states (proxy.cpp)
+// The child's exit code when the game's D3D12 runtime (--sdk) made no device; it printed nothing on stdout. The parent
+// runs it again on the system's runtime.
+constexpr int EXIT_SYSTEM_RUNTIME = 4;
 
 struct Opts {
     int threads = 0;
@@ -70,6 +81,8 @@ struct Opts {
     std::wstring stage_path;
     std::wstring ags, ags_app, ags_engine;
     std::wstring layer;          // a copy of the game's layer (ReShade's dll, its ini, add-ons), staged next to the exe
+    std::wstring d3d12;          // the game's Agility SDK folder (its D3D12Core.dll)
+    UINT sdk = 0;                // set by the parent for its child: the staged D3D12Core.dll's SDK version
     int pass = -1;
 };
 
@@ -91,6 +104,8 @@ static bool parse(int argc, wchar_t** argv, int i, Opts& o) {
         else if (k == L"--ags-engine") o.ags_engine = v;
         else if (k == L"--pass") o.pass = (int)wcstol(v.c_str(), &end, 10);
         else if (k == L"--layer") o.layer = v;
+        else if (k == L"--d3d12") o.d3d12 = v;
+        else if (k == L"--sdk") o.sdk = wcstoul(v.c_str(), &end, 10);
         else if (k == L"--skip" || k == L"--isolate") {
             for (const wchar_t* c = v.c_str(); *c;) {
                 (k == L"--skip" ? o.skip : o.isolate).push_back(_wcstoui64(c, &end, 10));
@@ -179,6 +194,7 @@ static int child(DWORD parent_pid, const Opts& o) {
     std::wstring dir = self, exe = dir.substr(dir.find_last_of(L'\\') + 1);
     dir.resize(dir.size() - exe.size());
     SetEnvironmentVariableW(L"SCSKILLER_MODE", L"warm");
+    D3D12SDKVersion = o.sdk;  // before the proxy loads the system d3d12.dll
     HMODULE m = LoadLibraryW((dir + L"d3d12.dll").c_str());
     auto proc = [m](const char* n) { return m ? (void*)GetProcAddress(m, n) : nullptr; };
     auto create_device = (decltype(&D3D12CreateDevice))proc("D3D12CreateDevice");
@@ -226,7 +242,16 @@ static int child(DWORD parent_pid, const Opts& o) {
         std::wstring why = ags_device(o, best, &dev);
         if (!why.empty()) fwprintf(stderr, L"AGS app %ls: %ls%ls\n", o.ags_app.c_str(), why.c_str(), dev ? L"" : L": a plain device (the exe name's cache)");
     }
-    if (!dev && FAILED(create_device(best, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)))) return fail(L"D3D12 device creation failed on " + std::wstring(bd.Description));
+    HRESULT hr = dev ? S_OK : create_device(best, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev));
+    if (FAILED(hr) && o.sdk) {
+        fwprintf(stderr, L"D3D12 device creation failed on the game's D3D12 runtime (SDK %u, 0x%08X): the system's runs\n", o.sdk, (unsigned)hr);
+        return EXIT_SYSTEM_RUNTIME;
+    }
+    if (FAILED(hr)) {
+        wchar_t why[16];
+        swprintf_s(why, L" (0x%08X)", (unsigned)hr);
+        return fail(L"D3D12 device creation failed on " + std::wstring(bd.Description) + why);
+    }
 
     uint64_t p[4];  // done, total, failed, finished
     progress(p);
@@ -284,7 +309,8 @@ int wmain(int argc, wchar_t** argv) {
               "                      [--stop-event <name>] [--adapter-luid <hex>] [--rt-threads N] [--skip i,j,...] [--memory-mb N]\n"
               "                      [--package <app user model id>] [--stage-path <install folder>\\<dir>\\<exe>]\n"
               "                      [--skip-keys <sha1 hex>,...] [--isolate i,j,...]\n"
-              "                      [--ags <amd_ags_x64.dll> --ags-app <name> --ags-engine <name>] [--pass K]\n", stderr);
+              "                      [--ags <amd_ags_x64.dll> --ags-app <name> --ags-engine <name>] [--pass K]\n"
+              "                      [--layer <folder>] [--d3d12 <folder>]\n", stderr);
         return fail(L"bad arguments");
     }
     std::wstring work = argv[1], exe = argv[2];
@@ -327,13 +353,23 @@ int wmain(int argc, wchar_t** argv) {
                 dirs.push_back(flat + sub.substr(0, e)), CreateDirectoryW(dirs.back().c_str(), nullptr), stage = dirs.back() + L"\\";
     }
     std::vector<std::wstring> layer;  // the --layer files staged (CopyFileW never overwrites a staged input)
+    std::vector<std::wstring> agility;  // the --d3d12 files staged, as D3D12\<name>
+    auto unput = [&](const std::wstring& name) {
+        std::wstring p = stage + name;
+        SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);  // a copy keeps its source's read-only attribute
+        DWORD err = DeleteFileW(p.c_str()) ? 0 : GetLastError();
+        if (err && err != ERROR_FILE_NOT_FOUND) fwprintf(stderr, L"removing the staged %ls failed (error %lu)\n", p.c_str(), err);
+    };
     struct Unstage {
         std::function<void()> f;
         ~Unstage() { f(); }
     } unstage{[&] {  // only inside this run's folder: the staged inputs go, the proxy's outputs stay in flat
         for (auto n : {exe, std::wstring(L"d3d12.dll"), std::wstring(L"scskiller.db"), std::wstring(L"scskiller_gen.db"), std::wstring(L"scskiller_pass.bin")})
-            DeleteFileW((stage + n).c_str());
-        for (auto& n : layer) DeleteFileW((stage + n).c_str());
+            unput(n);
+        for (auto& n : layer) unput(n);
+        for (auto& n : agility) unput(n);
+        if (!o.d3d12.empty() && !RemoveDirectoryW((stage + L"D3D12").c_str()))
+            fwprintf(stderr, L"removing the staged %lsD3D12 failed (error %lu)\n", stage.c_str(), GetLastError());
         if (stage == flat) return;
         for (auto n : {L"scskiller.log", L"scskiller_creates.csv", L"scskiller_warm_times.csv"})
             MoveFileExW((stage + n).c_str(), (flat + n).c_str(), 0);
@@ -367,6 +403,27 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (ec) return fail(L"--layer " + o.layer + L" can't be listed");
     }
+    UINT sdk = 0;
+    if (!o.d3d12.empty()) {
+        CreateDirectoryW((stage + L"D3D12").c_str(), nullptr);
+        // the Agility SDK redistributable's DLLs only (1.619's largest is 5 MB), whatever else the folder holds
+        for (const wchar_t* n : {L"D3D12Core.dll", L"d3d12SDKLayers.dll", L"D3D12StateObjectCompiler.dll"}) {
+            std::wstring from = o.d3d12 + L"\\" + n, to = std::wstring(L"D3D12\\") + n;
+            WIN32_FILE_ATTRIBUTE_DATA a;
+            if (!GetFileAttributesExW(from.c_str(), GetFileExInfoStandard, &a) || (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                a.nFileSizeHigh || a.nFileSizeLow > 64u << 20)
+                continue;
+            if (!put(from, to, false)) break;
+            agility.push_back(to);
+        }
+        // read here, not in the child: there a D3D12Core.dll loaded without its references would be the one the loader gets
+        HMODULE c = LoadLibraryExW((stage + L"D3D12\\D3D12Core.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+        auto v = c ? (const UINT*)GetProcAddress(c, "D3D12SDKVersion") : nullptr;
+        DWORD err = v ? 0 : GetLastError();
+        if (v) sdk = *v;
+        if (c) FreeLibrary(c);
+        if (!sdk) fwprintf(stderr, L"staging the game's D3D12 runtime from %ls failed (error %lu): the system's runs\n", o.d3d12.c_str(), err);
+    }
 
     const DWORD me = GetCurrentProcessId();
     HANDLE map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(LONG), beat_name(me).c_str());
@@ -386,86 +443,95 @@ int wmain(int argc, wchar_t** argv) {
         FreeEnvironmentStringsW(env);
         for (auto& n : reshade) SetEnvironmentVariableW(n.c_str(), nullptr);
     }
-    std::wstring args = L"--child " + std::to_wstring(me);
-    for (int i = 3; i < argc; ++i) args += L" \"" + std::wstring(argv[i]) + L"\"";
-    fflush(stdout);
-    std::vector<std::thread> relays;
-    PROCESS_INFORMATION pi = {};
-    if (!o.package.empty()) {
-        for (int fd : {1, 2}) {
-            HANDLE p = CreateNamedPipeW(pipe_name(me, fd).c_str(), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 0, 1 << 16, 0, nullptr);
-            if (p == INVALID_HANDLE_VALUE) return fail(L"output pipe setup failed (error " + std::to_wstring(GetLastError()) + L")");
-            relays.emplace_back([p, out = GetStdHandle(fd == 1 ? STD_OUTPUT_HANDLE : STD_ERROR_HANDLE)] {
-                char buf[4096];
-                DWORD n, w;
-                if (ConnectNamedPipe(p, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED)
-                    while (ReadFile(p, buf, sizeof buf, &n, nullptr) && n) WriteFile(out, buf, n, &w, nullptr);
-                CloseHandle(p);
-            });
+    for (;;) {  // twice when the game's D3D12 runtime makes no device: then on the system's
+        std::wstring args = L"--child " + std::to_wstring(me);
+        for (int i = 3; i < argc; ++i) args += L" \"" + std::wstring(argv[i]) + L"\"";
+        if (sdk) args += L" --sdk " + std::to_wstring(sdk);
+        fflush(stdout);
+        std::vector<std::thread> relays;
+        PROCESS_INFORMATION pi = {};
+        if (!o.package.empty()) {
+            for (int fd : {1, 2}) {
+                HANDLE p = CreateNamedPipeW(pipe_name(me, fd).c_str(), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 0, 1 << 16, 0, nullptr);
+                if (p == INVALID_HANDLE_VALUE) return fail(L"output pipe setup failed (error " + std::to_wstring(GetLastError()) + L")");
+                relays.emplace_back([p, out = GetStdHandle(fd == 1 ? STD_OUTPUT_HANDLE : STD_ERROR_HANDLE)] {
+                    char buf[4096];
+                    DWORD n, w;
+                    if (ConnectNamedPipe(p, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED)
+                        while (ReadFile(p, buf, sizeof buf, &n, nullptr) && n) WriteFile(out, buf, n, &w, nullptr);
+                    CloseHandle(p);
+                });
+            }
+            IDesktopAppXActivator* act = nullptr;
+            HANDLE h = nullptr;
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            HRESULT hr = CoCreateInstance(CLSID_DesktopAppXActivator, nullptr, CLSCTX_ALL, __uuidof(IDesktopAppXActivator), (void**)&act);
+            // 0x24: DAXAO_NONPACKAGED_EXE_PROCESS_TREE | DAXAO_CENTENNIAL_PROCESS (Invoke-CommandInDesktopPackage's, minus its App Installer check)
+            if (SUCCEEDED(hr))
+                hr = act->ActivateWithOptionsArgsWorkingDirectoryShowWindow(o.package.c_str(), (stage + exe).c_str(), args.c_str(), 0x24, 0, nullptr, stage.c_str(), SW_HIDE, &h);
+            if (act) act->Release();
+            if (SUCCEEDED(hr) && h) {
+                pi.dwProcessId = GetProcessId(h);
+                CloseHandle(h);
+                pi.hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SET_QUOTA, FALSE, pi.dwProcessId);
+                // the activator's process isn't in our caller's job: it dies with this process instead
+                HANDLE job = CreateJobObjectW(nullptr, nullptr);
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {};
+                li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (pi.hProcess && (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li) || !AssignProcessToJobObject(job, pi.hProcess)))
+                    TerminateProcess(pi.hProcess, 1), pi.hProcess = nullptr;
+            }
+            if (!pi.hProcess) fwprintf(stderr, L"running in the package %ls failed (0x%08X): warming under the exe name only\n", o.package.c_str(), (unsigned)hr);
         }
-        IDesktopAppXActivator* act = nullptr;
-        HANDLE h = nullptr;
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        HRESULT hr = CoCreateInstance(CLSID_DesktopAppXActivator, nullptr, CLSCTX_ALL, __uuidof(IDesktopAppXActivator), (void**)&act);
-        // 0x24: DAXAO_NONPACKAGED_EXE_PROCESS_TREE | DAXAO_CENTENNIAL_PROCESS (Invoke-CommandInDesktopPackage's, minus its App Installer check)
-        if (SUCCEEDED(hr))
-            hr = act->ActivateWithOptionsArgsWorkingDirectoryShowWindow(o.package.c_str(), (stage + exe).c_str(), args.c_str(), 0x24, 0, nullptr, stage.c_str(), SW_HIDE, &h);
-        if (act) act->Release();
-        if (SUCCEEDED(hr) && h) {
-            pi.dwProcessId = GetProcessId(h);
-            CloseHandle(h);
-            pi.hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SET_QUOTA, FALSE, pi.dwProcessId);
-            // the activator's process isn't in our caller's job: it dies with this process instead
-            HANDLE job = CreateJobObjectW(nullptr, nullptr);
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {};
-            li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if (pi.hProcess && (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li) || !AssignProcessToJobObject(job, pi.hProcess)))
-                TerminateProcess(pi.hProcess, 1), pi.hProcess = nullptr;
+        if (!pi.hProcess) {
+            std::wstring cmd = L"\"" + stage + exe + L"\" " + args;
+            STARTUPINFOW si = {sizeof si};
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE), si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            for (HANDLE h : {si.hStdOutput, si.hStdError}) SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, o.idle ? IDLE_PRIORITY_CLASS : 0, nullptr, stage.c_str(), &si, &pi))
+                return fail(L"launching the staged exe failed (error " + std::to_wstring(GetLastError()) + L")");
         }
-        if (!pi.hProcess) fwprintf(stderr, L"running in the package %ls failed (0x%08X): warming under the exe name only\n", o.package.c_str(), (unsigned)hr);
-    }
-    if (!pi.hProcess) {
-        std::wstring cmd = L"\"" + stage + exe + L"\" " + args;
-        STARTUPINFOW si = {sizeof si};
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE), si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-        for (HANDLE h : {si.hStdOutput, si.hStdError}) SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, o.idle ? IDLE_PRIORITY_CLASS : 0, nullptr, stage.c_str(), &si, &pi))
-            return fail(L"launching the staged exe failed (error " + std::to_wstring(GetLastError()) + L")");
-    }
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);  // a starved heartbeat would read as a pause
-    wchar_t lim[16] = {};
-    ULONGLONG exit_ms = 1000ull * (GetEnvironmentVariableW(L"SCSKILLER_WARM_EXIT_S", lim, 16) ? _wtoi(lim) : 600), final_at = 0;
-    // counted in this loop's turns, not wall time: the caller suspends this process to pause the warm
-    uint64_t start_turns = 10ull * (GetEnvironmentVariableW(L"SCSKILLER_WARM_START_S", lim, 16) ? _wtoi(lim) : 180), turns = 0;
-    bool killed = false, stuck = false;
-    while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT) {
-        InterlockedIncrement(beat);
-        if (started && ++turns > start_turns && WaitForSingleObject(started, 0) == WAIT_TIMEOUT) {
-            TerminateProcess(pi.hProcess, 1), stuck = true;
-            WaitForSingleObject(pi.hProcess, 5000);
-            break;
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);  // a starved heartbeat would read as a pause
+        wchar_t lim[16] = {};
+        // counted in this loop's turns, not wall time: the caller suspends this process to pause the warm
+        uint64_t exit_turns = 10ull * (GetEnvironmentVariableW(L"SCSKILLER_WARM_EXIT_S", lim, 16) ? _wtoi(lim) : 600), final_turn = 0;
+        uint64_t start_turns = 10ull * (GetEnvironmentVariableW(L"SCSKILLER_WARM_START_S", lim, 16) ? _wtoi(lim) : 180), turns = 0;
+        bool killed = false, stuck = false;
+        while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT) {
+            InterlockedIncrement(beat);
+            if (++turns > start_turns && started && WaitForSingleObject(started, 0) == WAIT_TIMEOUT) {
+                TerminateProcess(pi.hProcess, 1), stuck = true;
+                WaitForSingleObject(pi.hProcess, 5000);
+                break;
+            }
+            if (final_event && !final_turn && WaitForSingleObject(final_event, 0) == WAIT_OBJECT_0) final_turn = turns;
+            if (final_turn && turns - final_turn > exit_turns) {
+                fwprintf(stderr, L"the warm process did not exit %llu s after its last line: terminated (its unwritten driver cache is lost)\n", exit_turns / 10);
+                TerminateProcess(pi.hProcess, 3), killed = true;
+                WaitForSingleObject(pi.hProcess, 5000);
+                break;
+            }
         }
-        if (final_event && !final_at && WaitForSingleObject(final_event, 0) == WAIT_OBJECT_0) final_at = GetTickCount64();
-        if (final_at && GetTickCount64() - final_at > exit_ms) {
-            fwprintf(stderr, L"the warm process did not exit %llu s after its last line: terminated (its unwritten driver cache is lost)\n", exit_ms / 1000);
-            TerminateProcess(pi.hProcess, 3), killed = true;
-            WaitForSingleObject(pi.hProcess, 5000);
-            break;
+        for (auto& t : relays) {  // a child that never connected leaves its relay in ConnectNamedPipe
+            if (WaitForSingleObject(t.native_handle(), 1000) == WAIT_TIMEOUT) CancelSynchronousIo(t.native_handle());
+            t.join();
         }
+        if (stuck)
+            return fail(L"the warm process didn't start replaying within " + std::to_wstring(start_turns / 10) + L" s" +
+                        (o.layer.empty() ? L"" : L" (an add-on of the game's layer may hang outside the game)") + L"; ended it");
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        if (killed) return 3;  // its last line (done / retry) was printed; the caller goes by it
+        if (code == EXIT_SYSTEM_RUNTIME && sdk) {
+            CloseHandle(pi.hProcess);
+            if (pi.hThread) CloseHandle(pi.hThread);
+            sdk = 0;
+            continue;
+        }
+        wchar_t hex[16];
+        swprintf_s(hex, L"0x%08X", code);
+        if (code > 1 && code != 3) return fail(L"the warm process died (exit code " + std::wstring(hex) + L")");  // it printed no error line
+        return (int)code;
     }
-    for (auto& t : relays) {  // a child that never connected leaves its relay in ConnectNamedPipe
-        if (WaitForSingleObject(t.native_handle(), 1000) == WAIT_TIMEOUT) CancelSynchronousIo(t.native_handle());
-        t.join();
-    }
-    if (stuck)
-        return fail(L"the warm process didn't start replaying within " + std::to_wstring(start_turns / 10) + L" s" +
-                    (o.layer.empty() ? L"" : L" (an add-on of the game's layer may hang outside the game)") + L"; ended it");
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    if (killed) return 3;  // its last line (done / retry) was printed; the caller goes by it
-    wchar_t hex[16];
-    swprintf_s(hex, L"0x%08X", code);
-    if (code > 1 && code != 3) return fail(L"the warm process died (exit code " + std::wstring(hex) + L")");  // it printed no error line
-    return (int)code;
 }

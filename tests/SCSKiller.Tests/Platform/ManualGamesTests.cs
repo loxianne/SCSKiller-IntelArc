@@ -62,6 +62,55 @@ public sealed class ManualGamesTests : IDisposable
         Assert.Contains("game_dx11.exe", e.Message);
     }
 
+    /// <summary>Returnal: a modular Unreal build whose Shipping exe imports its RHI module, not a graphics API, beside a
+    /// 32-bit Launcher.exe that does. The pick is the game.</summary>
+    [Fact]
+    public void A_modular_unreal_shipping_exe_is_kept_over_a_32_bit_launcher_beside_it()
+    {
+        var (root, stub, shipping) = UnrealLayout(Path.Combine(_root, "Modular"));
+        File.WriteAllBytes(shipping, Exe("Game-RHI-Win64-Shipping.dll", padding: 8192));
+        var launcher = Exe("d3d11.dll");
+        BinaryPrimitives.WriteUInt16LittleEndian(launcher.AsSpan(BinaryPrimitives.ReadInt32LittleEndian(launcher.AsSpan(0x3C)) + 4), 0x14C);   // i386
+        File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(shipping)!, "Launcher.exe"), launcher);
+        Assert.Equal(new ManualEntry(shipping, root, "Modular"), ManualSource.Resolve(shipping));
+        Assert.Equal(shipping, ManualSource.Resolve(stub).Exe);
+        File.WriteAllBytes(shipping, Exe(padding: 8192));   // one whose imports name nothing graphic (a packed exe): still not the launcher
+        Assert.Equal(shipping, ManualSource.Resolve(shipping).Exe);
+    }
+
+    /// <summary>Returnal's Launcher.exe is 32-bit and larger than its Shipping exe: discovery and the launcher stub still find
+    /// the game, also with anti-cheat in the install, where no exe is read and the Shipping name decides.</summary>
+    [Fact]
+    public void A_larger_32_bit_launcher_beside_the_shipping_exe_is_never_the_game()
+    {
+        var (root, stub, shipping) = UnrealLayout(Path.Combine(_root, "Returnal"));
+        var launcher = Exe("d3d11.dll", padding: 50_000);
+        BinaryPrimitives.WriteUInt16LittleEndian(launcher.AsSpan(BinaryPrimitives.ReadInt32LittleEndian(launcher.AsSpan(0x3C)) + 4), 0x14C);   // i386
+        var launcherPath = Path.Combine(Path.GetDirectoryName(shipping)!, "Launcher.exe");
+        File.WriteAllBytes(launcherPath, launcher);
+        Assert.Equal(shipping, GameFiles.FindExe(root));
+        Assert.Equal(new ManualEntry(shipping, root, "Returnal"), ManualSource.Resolve(stub));
+        Directory.CreateDirectory(Path.Combine(root, "EasyAntiCheat"));
+        Assert.Equal(shipping, GameFiles.FindExe(root));
+    }
+
+    /// <summary>Returnal from Steam: the 64-bit Epic Online Services installer is the largest exe in Binaries\Win64.</summary>
+    [Fact]
+    public void Installers_and_engine_helpers_beside_an_unreal_exe_are_never_the_game()
+    {
+        var (root, stub, shipping) = UnrealLayout(Path.Combine(_root, "Returnal"));
+        var bin = Path.GetDirectoryName(shipping)!;
+        foreach (var helper in new[] { "EpicOnlineServicesInstaller.exe", "CrashReportClient.exe", "UnrealCEFSubProcess.exe",
+                     "EasyAntiCheat_EOS_Setup.exe", "vc_redist.x64.exe", "dxsetup.exe", "UE4PrereqSetup_x64.exe" })
+            File.WriteAllBytes(Path.Combine(bin, helper), Exe("d3d11.dll", padding: 50_000));
+        Assert.Equal(shipping, GameFiles.FindExe(root));
+        Assert.Equal(shipping, ManualSource.Resolve(stub).Exe);
+
+        var game = Path.Combine(bin, "Game.exe");   // a game exe not named for Shipping: the largest that is no helper
+        File.Move(shipping, game);
+        Assert.Equal(game, GameFiles.FindExe(root));
+    }
+
     [Fact]
     public void A_suggested_folder_sees_anti_cheat_in_the_folders_above_it_and_a_confirmed_folder_is_checked_whole()
     {

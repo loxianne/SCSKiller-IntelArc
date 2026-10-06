@@ -96,6 +96,21 @@ public partial class AppTests
         await AssertStaysArmed(k, _game);
     }
 
+    /// <summary>The scan's migration of a recording stored before compact recordings writes the game folder's keys file and
+    /// ini and the record: an install of the recorder (turning it on) waits for it.</summary>
+    [Fact]
+    public async Task A_recording_migration_holds_the_recorders()
+    {
+        using var _ = new FreshLedger(_root);
+        var k = Managed();
+        bool? held = null;
+        k.MigrationLoaded = () => held = k.HoldsRecorderLock;
+        Recorded(k, _game);
+        await k.ScanAsync(default);
+        await k.RecordingMigration.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(held);
+    }
+
     [Fact]
     public async Task Every_watcher_pass_arms_an_installed_recorder_that_isnt()
     {
@@ -240,5 +255,108 @@ public partial class AppTests
         using var _ = new FreshLedger(_root);
         ScsKiller.WriteAttestation(_game.ExePath);
         Assert.True(ArmedWithLedger(_game));
+    }
+
+    /// <summary>A start with nothing changed walks no install: the scan's cached verdict, the reconcile that arms the recorder
+    /// again, the new install watcher's first look and the full pass all go by the folders' stamp, which the recorder's own
+    /// files don't change. A file added beside the exe is walked.</summary>
+    [Fact]
+    public async Task A_start_with_nothing_changed_walks_no_install()
+    {
+        using var _ = new FreshLedger(_root);
+        var first = Managed();
+        await first.ScanAsync(default);   // detects, walks, installs and arms the recorder
+        Assert.True(ArmedWithLedger(_game));
+        first.StopWatchingInstalls();   // the app exits
+
+        var k = Managed();
+        var walks = 0;
+        k.FullAntiCheatCheck = g => { Interlocked.Increment(ref walks); return Core.Games.GameFiles.DetectAntiCheat(g); };
+        await k.ScanAsync(default);
+        await k.CheckRecorderGames(false);
+        await k.CheckRecorderGames(true);
+        Assert.Equal(0, walks);
+        await AssertStaysArmed(k, _game);
+
+        File.WriteAllBytes(Path.Combine(_exeDir, "patch.dll"), [0x4D, 0x5A]);
+        await Until(() => !File.Exists(Path.Combine(_exeDir, ScsKiller.ArmedFile)));   // the watcher's event
+        await Until(() => !k.DisarmQueued(_game));
+        await k.CheckRecorderGames(false);
+        Assert.Equal(1, walks);
+        await AssertStaysArmed(k, _game);
+        k.StopWatchingInstalls();
+    }
+
+    /// <summary>Anti-cheat put deep in a recorder game's install while the app runs: the root's and exe folder's own entries
+    /// stay the same, the install watcher's event disarms, and a reconcile before the next pass walks the install in full
+    /// rather than arm it again by its last clean walk.</summary>
+    [Fact]
+    public async Task A_watcher_event_makes_the_next_reconcile_walk_the_install()
+    {
+        using var _ = new FreshLedger(_root);
+        var k = Managed();
+        await k.ScanAsync(default);   // installs and arms the recorder
+        await k.CheckRecorderGames(false);
+        Assert.True(ArmedWithLedger(_game));
+        var walks = 0;
+        k.FullAntiCheatCheck = g => { Interlocked.Increment(ref walks); return Core.Games.GameFiles.DetectAntiCheat(g); };
+        Directory.CreateDirectory(Path.Combine(_game.InstallDir, "Fake", "Content", "support", "EasyAntiCheat"));
+        await Until(() => !File.Exists(Path.Combine(_exeDir, ScsKiller.ArmedFile)));   // the watcher's event
+        await Until(() => !k.DisarmQueued(_game));
+        k.ReconcileRecorders();
+        Assert.Equal(1, walks);
+        Assert.Equal(AntiCheat.EasyAntiCheat, k.Games.Single().AntiCheat);
+        Assert.False(ArmedWithLedger(_game));
+        Assert.False(File.Exists(Path.Combine(_exeDir, "d3d12.dll")));
+        k.StopWatchingInstalls();
+    }
+
+    /// <summary>What ReShade, a mod and an RE Engine game write beside the exe at every launch and exit (ReShade.log1 when
+    /// another ReShade holds ReShade.log, RE Engine's shader.cache2): the recorder stays armed and nothing is walked.</summary>
+    [Fact]
+    public async Task A_mods_logs_settings_and_caches_keep_the_recorder_armed()
+    {
+        using var _ = new FreshLedger(_root);
+        var k = Managed();
+        await k.ScanAsync(default);
+        await k.CheckRecorderGames(false);
+        Assert.True(ArmedWithLedger(_game));
+        var walks = 0;
+        k.FullAntiCheatCheck = g => { Interlocked.Increment(ref walks); return Core.Games.GameFiles.DetectAntiCheat(g); };
+        foreach (var name in new[] { "ReShade.log", "ReShade.log1", "ReShade.ini", "ReShadePreset.ini", "renodx.log", "shader.cache2", "exception_00.dmp" })
+            File.WriteAllText(Path.Combine(_exeDir, name), "data");
+        await AssertStaysArmed(k, _game);
+        await k.CheckRecorderGames(false);
+        await k.CheckRecorderGames(true);
+        Assert.Equal(0, walks);
+        Assert.True(ArmedWithLedger(_game));
+        k.StopWatchingInstalls();
+    }
+
+    /// <summary>A new DLL beside the exe disarms at once, even before anything is written in it, and the next pass walks the
+    /// install and arms it again.</summary>
+    [Fact]
+    public async Task A_new_dll_beside_the_exe_disarms_until_the_install_is_checked()
+    {
+        using var _ = new FreshLedger(_root);
+        var k = Managed();
+        await k.ScanAsync(default);
+        await k.CheckRecorderGames(false);
+        Assert.True(ArmedWithLedger(_game));
+        var walks = 0;
+        k.FullAntiCheatCheck = g => { Interlocked.Increment(ref walks); return Core.Games.GameFiles.DetectAntiCheat(g); };
+        File.Create(Path.Combine(_exeDir, "mod.dll")).Dispose();
+        await Until(() => !File.Exists(Path.Combine(_exeDir, ScsKiller.ArmedFile)));   // the watcher's event
+        await Until(() => !k.DisarmQueued(_game));
+        await k.CheckRecorderGames(false);
+        Assert.Equal(1, walks);
+        await AssertStaysArmed(k, _game);
+        k.StopWatchingInstalls();
+
+        var stamp = ScsKiller.FolderStamp(_game);
+        File.WriteAllText(Path.Combine(_exeDir, "ReShade.log1"), "data");
+        Assert.Equal(stamp, ScsKiller.FolderStamp(_game));
+        File.Create(Path.Combine(_exeDir, "guard.dat")).Dispose();   // a type not known to be data, by name
+        Assert.NotEqual(stamp, ScsKiller.FolderStamp(_game));
     }
 }

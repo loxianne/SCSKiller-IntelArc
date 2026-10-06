@@ -76,6 +76,7 @@ public sealed class Warmer(IGpuVendorBackend vendor, string? warmExe = null) : I
         var ags = AgsArgs(vendor.Vendor, game, reg, reg == null ? null : AmdAgs.DllFor(game, NativeTools.Find(AmdAgs.DllName)), out var agsWhy);
         if (agsWhy != null) Log?.Report($"{game.Name}: {agsWhy}");
         if (Layer?.Invoke(game, workDir) is { } layer) ags = [.. ags, "--layer", layer];
+        if (AgilityDir(game.ExePath) is { } d3d12) ags = [.. ags, "--d3d12", d3d12];
         return new WarmRun(vendor, gpu, exe, game, workDir, options, progress, StuckAfter, stagePath, MaxRecoveries, Environment, ags, Log);
     }
 
@@ -92,6 +93,30 @@ public sealed class Warmer(IGpuVendorBackend vendor, string? warmExe = null) : I
             return [];
         }
         return ["--ags", agsDll, "--ags-app", reg.App, "--ags-engine", reg.Engine];
+    }
+
+    /// <summary>scskiller_warm's --d3d12: the folder of the Agility SDK runtime the game's exe asks for (its D3D12SDKPath
+    /// export, relative to the exe), when it holds a D3D12Core.dll; null otherwise. The warm then runs on that runtime, as
+    /// the game does: where the system's is older (Windows 10), it rejects what the game recorded on the newer one.</summary>
+    public static string? AgilityDir(string exePath)
+    {
+        try
+        {
+            using var pe = Carved.PeFile.Open(exePath);
+            return AgilityFolder(Path.GetDirectoryName(Path.GetFullPath(exePath))!, Carved.PeFile.ExportedString(pe, "D3D12SDKPath")) is { } dir
+                   && File.Exists(Path.Combine(dir, "D3D12Core.dll")) ? dir : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or BadImageFormatException or ArgumentException) { return null; }
+    }
+
+    /// <summary>The folder a D3D12SDKPath export names: a relative path that stays inside the exe's folder, as the D3D12
+    /// loader takes it; null for anything else (an absolute path, a drive, a ".." out of it).</summary>
+    public static string? AgilityFolder(string exeDir, string? sdkPath)
+    {
+        if (string.IsNullOrEmpty(sdkPath) || Path.IsPathRooted(sdkPath) || sdkPath.Contains(':')) return null;
+        var dir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(exeDir, sdkPath)));
+        var rel = Path.GetRelativePath(exeDir, dir);
+        return rel == ".." || rel.StartsWith(@"..\", StringComparison.Ordinal) || Path.IsPathRooted(rel) ? null : dir;
     }
 
     const int MaxPath = 260;

@@ -82,7 +82,7 @@ public sealed class FakeScsKiller : IScsKiller
             G("3400000", "Life is Strange: Reunion", "5.5", "Reunion-Win64-Shipping.exe", 44_736, GameStatus.NeedsRecording, Core.Planning.Planner.Record + "; not in the community database yet", at: "ea")
                 with { InCommunityDb = false },
             // compiled without its ray tracing (the plan can't rebuild Unreal 5's), in the community database
-            G("3300000", "Darwin's Paradox", "5.3", "DarwinsParadox-Win64-Shipping.exe", 108_542, GameStatus.NeedsRecording, Core.App.ScsKiller.RtNote(true), at: "epic",
+            G("3300000", "Darwin's Paradox", "5.3", "DarwinsParadox-Win64-Shipping.exe", 108_542, GameStatus.Warmed, "warmed for driver 610.88; " + Core.App.ScsKiller.RtAfterRecordingNote, at: "epic",
                 plan: new PlanStats(0, 96_210, 96_210, 64, false, Uncovered: 794, RtLibraries: 412, RtUncovered: 412, StageSets: 97_004, LeftOut: 794, RtInline: 0)) with
             {
                 WarmedDriverVersion = "610.88", WarmedAt = DateTimeOffset.Now.AddDays(-1).AddHours(-3), LastWarmTime = TimeSpan.FromSeconds(204), CacheOnDisk = 2_310_000_000,

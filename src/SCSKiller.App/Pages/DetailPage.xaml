@@ -286,8 +286,6 @@
                             <TextBlock Text="{x:Bind Vm.CompileTitle, Mode=OneWay}" Style="{StaticResource Section}" />
                             <TextBlock Text="{x:Bind Vm.CompileText, Mode=OneWay}" TextWrapping="Wrap" />
                         </StackPanel>
-                        <InfoBar Severity="Warning" IsClosable="False" IsOpen="{x:Bind Vm.HasFailed, Mode=OneWay}" Visibility="{x:Bind Vm.HasFailed, Mode=OneWay}"
-                                 Title="{x:Bind Vm.FailedTitle, Mode=OneWay}" Message="{x:Bind Vm.FailedText, Mode=OneWay}" />
                         <InfoBar Severity="Informational" IsClosable="False" IsOpen="{x:Bind Vm.HasSkipped, Mode=OneWay}" Visibility="{x:Bind Vm.HasSkipped, Mode=OneWay}"
                                  Title="{x:Bind Vm.SkippedTitle, Mode=OneWay}" Message="{x:Bind Vm.SkippedText, Mode=OneWay}" />
                         <Grid ColumnSpacing="12" Visibility="{x:Bind Vm.HasCareful, Mode=OneWay}">

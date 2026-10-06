@@ -78,6 +78,7 @@ public class WarmerTests : IDisposable
 
     readonly string _dir = Path.Combine(Path.GetTempPath(), "scskiller-warm-test-" + Guid.NewGuid().ToString("N")[..8]);
     readonly string _exe;
+    readonly DateTime _started = DateTime.UtcNow;
     static readonly Game Game = new("test:1", "Fake", Store.Other, @"C:\nowhere", @"C:\nowhere\Binaries\Win64\Fake-Win64-Shipping.exe");
     static readonly UnsupportedVendor Vendor = new(new GpuInfo(GpuVendor.Unknown, "Fake GPU", "1.0", 0x1234ABCD, 0));
 
@@ -89,7 +90,14 @@ public class WarmerTests : IDisposable
         File.WriteAllText(_exe, "@powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake_warm.ps1\" %*\r\n@exit /b %ERRORLEVEL%\r\n");
     }
 
-    public void Dispose() => Directory.Delete(_dir, true);
+    public void Dispose()
+    {
+        TestD3DSCache.Clean(_dir, _started);   // the staged exes' D3DSCache folders
+        // a killed fake warm's console host can hold its working directory a moment after the warm itself has exited
+        for (var i = 0; ; i++)
+            try { Directory.Delete(_dir, true); return; }
+            catch (IOException) when (i < 50) { Thread.Sleep(100); }
+    }
 
     string Work(string mode)
     {
@@ -241,6 +249,98 @@ public class WarmerTests : IDisposable
         Assert.Equal(["scskiller.log", "scskiller_creates.csv"], Directory.GetFiles(flat).Select(Path.GetFileName).Order(StringComparer.Ordinal));
         Assert.Empty(Directory.GetDirectories(flat));
         Assert.Equal(["scskiller.log", "scskiller_creates.csv"], Directory.GetFiles(stage).Select(Path.GetFileName).Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(@".\D3D12\", @"C:\G\Bin\D3D12")]
+    [InlineData(@".\D3D12_0\", @"C:\G\Bin\D3D12_0")]
+    [InlineData(@"D3D12-REDIST", @"C:\G\Bin\D3D12-REDIST")]
+    [InlineData(@".\", @"C:\G\Bin")]
+    [InlineData(@"..data\D3D12\", @"C:\G\Bin\..data\D3D12")]
+    [InlineData(@"..\D3D12\", null)]
+    [InlineData(@".\D3D12\..\..\Windows\System32\", null)]
+    [InlineData(@"C:\Windows\System32\", null)]
+    [InlineData(@"\Windows\System32", null)]
+    [InlineData(@"C:Windows", null)]
+    [InlineData(@"\server\share\D3D12", null)]
+    [InlineData("", null)]
+    public void The_Agility_folder_must_be_inside_the_exe_s_folder(string sdkPath, string? expected) =>
+        Assert.Equal(expected, Warmer.AgilityFolder(@"C:\G\Bin", sdkPath));
+
+    /// <summary>The real scskiller_warm on WARP for a game shipping the Agility SDK (its exe a copy of scskiller_warm, which
+    /// exports D3D12SDKPath .\D3D12\): the folder is passed (--d3d12), its runtime DLLs staged next to the child's exe and
+    /// removed after, read-only ones included. A D3D12Core.dll that doesn't load or is over the size cap leaves the system's
+    /// runtime; one that makes no device (fakenext.dll, SDK 100000) runs the child again on the system's. SCSKILLER_AGILITY_DIR
+    /// (a game's Agility SDK folder, e.g. The Witcher 3's bin\x64_dx12\D3D12_0) also checks the child runs on that runtime
+    /// when it is newer than the system's, else on the system's. Needs this checkout's proxy built.</summary>
+    [Fact]
+    public async Task The_real_warm_runs_on_the_game_s_Agility_runtime()
+    {
+        var bin = Path.Combine(TestEnv.RepoRoot, "proxy", "build", "Release");
+        if (!File.Exists(Path.Combine(bin, "scskiller_warm.exe"))) return;
+        var luid = Process.Start(new ProcessStartInfo(Path.Combine(bin, "selftest.exe"), "warpluid") { RedirectStandardOutput = true })!.StandardOutput.ReadToEnd().Trim();
+        var vendor = new UnsupportedVendor(new GpuInfo(GpuVendor.Unknown, "WARP", "1.0", Convert.ToInt64(luid, 16), 0));
+        var install = Path.Combine(_dir, "games", "Agility");
+        var exe = Path.Combine(install, "Bin", $"scsk-agility-{Guid.NewGuid():N}"[..20] + ".exe");
+        var core = Path.Combine(install, "Bin", "D3D12");
+        var dll = Path.Combine(core, "D3D12Core.dll");
+        Directory.CreateDirectory(core);
+        File.Copy(Path.Combine(bin, "scskiller_warm.exe"), exe);
+        var game = Game with { InstallDir = install, ExePath = exe };
+        Assert.Null(Warmer.AgilityDir(exe));   // no D3D12Core.dll there
+        static uint Sdk(string dll)
+        {
+            using var pe = Core.Carved.PeFile.Open(dll);
+            return Core.Carved.PeFile.ExportData(pe, "D3D12SDKVersion")!.Value.ReadUInt32();
+        }
+        async Task<(string Runtime, string Log)> Run()
+        {
+            var work = Directory.CreateDirectory(Path.Combine(_dir, "work-" + Guid.NewGuid().ToString("N")[..6])).FullName;
+            var log = new List<string>();
+            var r = await new Warmer(vendor, Path.Combine(bin, "scskiller_warm.exe")) { Log = new Progress(log.Add) }
+                .Start(game, work, new WarmOptions(1, WarmPriority.BelowNormal), null).Completion.WaitAsync(Patience);
+            Assert.Equal(WarmOutcome.Completed, r.Outcome);
+            var stage = Path.GetDirectoryName(r.LogPath)!;
+            Assert.Empty(Directory.GetDirectories(stage));
+            Assert.DoesNotContain(log, l => l.Contains("removing the staged"));
+            return (File.ReadLines(r.LogPath, System.Text.Encoding.Latin1).Single(l => l.Contains("warm: D3D12 runtime ")), string.Join('\n', log));
+        }
+        void Put(string from)
+        {
+            if (File.Exists(dll)) File.SetAttributes(dll, FileAttributes.Normal);
+            File.Copy(from, dll, true);
+            File.SetAttributes(dll, FileAttributes.ReadOnly);
+        }
+        var system = Path.Combine(Environment.SystemDirectory, "D3D12Core.dll");
+        var onSystem = $"{system} (SDK {Sdk(system)})";
+        try
+        {
+            File.WriteAllText(Path.Combine(_dir, "notadll"), "not a dll");
+            Put(Path.Combine(_dir, "notadll"));
+            Assert.Equal(core, Warmer.AgilityDir(exe));
+            var (runtime, log) = await Run();
+            Assert.Contains(onSystem, runtime, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"staging the game's D3D12 runtime from {core} failed", log);
+
+            using (var big = File.Create(Path.Combine(_dir, "big"))) big.SetLength((64 << 20) + 1);
+            Put(Path.Combine(_dir, "big"));
+            (runtime, log) = await Run();
+            Assert.Contains(onSystem, runtime, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains($"staging the game's D3D12 runtime from {core} failed", log);
+
+            Put(Path.Combine(bin, "fakenext.dll"));
+            (runtime, log) = await Run();
+            Assert.Contains(onSystem, runtime, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("D3D12 device creation failed on the game's D3D12 runtime (SDK 100000", log);
+
+            if (Environment.GetEnvironmentVariable("SCSKILLER_AGILITY_DIR") is not { Length: > 0 } agility) return;
+            File.SetAttributes(dll, FileAttributes.Normal);
+            foreach (var f in Directory.GetFiles(agility, "*.dll")) File.Copy(f, Path.Combine(core, Path.GetFileName(f)), true);
+            (runtime, _) = await Run();
+            var (sdk, systemSdk) = (Sdk(dll), Sdk(system));
+            Assert.Contains(sdk > systemSdk ? $@"\D3D12\D3D12Core.dll (SDK {sdk})" : onSystem, runtime, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { File.SetAttributes(dll, FileAttributes.Normal); }
     }
 
     /// <summary>The real scskiller_warm on WARP with a layer (--layer): its dlls, ini and add-ons are staged next to the
@@ -451,6 +551,57 @@ public class WarmerTests : IDisposable
         File.WriteAllBytes(Path.Combine(work, WarmPasses.FileName), [1, WarmPasses.FastPass, 1, 1]);
         r = await warmer.Start(game, work, new WarmOptions(1, WarmPriority.BelowNormal), null).Completion.WaitAsync(Patience);
         Assert.Equal((WarmOutcome.Failed, "scskiller_pass.bin has 4 items, the dbs 3"), (r.Outcome, r.Error));
+    }
+
+    /// <summary>The real scskiller_warm on WARP: 32 D3D11 items (missing shaders: each fails at once) on one worker, with
+    /// SCSKILLER_TEST_HANG11 = <paramref name="hang"/> (an 8 s stuck limit), paused for 10 s once the first batch of 16 is
+    /// done, so while the worker is in item 16. Null: this checkout's proxy isn't built.</summary>
+    async Task<(WarmResult R, string Log, TimeSpan AfterResume)?> PausedInItem16(string hang)
+    {
+        var bin = Path.Combine(TestEnv.RepoRoot, "proxy", "build", "Release");
+        if (!File.Exists(Path.Combine(bin, "scskiller_warm.exe"))) return null;
+        var luid = Process.Start(new ProcessStartInfo(Path.Combine(bin, "selftest.exe"), "warpluid") { RedirectStandardOutput = true })!.StandardOutput.ReadToEnd().Trim();
+        var vendor = new UnsupportedVendor(new GpuInfo(GpuVendor.Unknown, "WARP", "1.0", Convert.ToInt64(luid, 16), 0));
+        var work = Path.Combine(_dir, "work");
+        Directory.CreateDirectory(work);
+        using (var gen = File.Create(Path.Combine(work, "scskiller_gen.db")))
+            for (var i = 1; i <= 32; i++) Core.Planning.PsoDb.Write(gen, '1', Core.Planning.PsoDb.D3D11Item(Stage.Vertex, $"{i:x40}"));
+        var game = Game with { ExePath = Path.Combine(_dir, $"scsk-pause-{Guid.NewGuid():N}"[..20] + ".exe") };
+        var c = new Counter();
+        var run = new Warmer(vendor, Path.Combine(bin, "scskiller_warm.exe")) { Environment = new Dictionary<string, string> { ["SCSKILLER_TEST_HANG11"] = hang } }
+            .Start(game, work, new WarmOptions(1, WarmPriority.BelowNormal), c);
+        await Until(() => c.Last?.Done >= 16);
+        run.Pause();
+        await Task.Delay(TimeSpan.FromSeconds(10));
+        run.Resume();
+        var clock = Stopwatch.StartNew();
+        var r = await run.Completion.WaitAsync(Patience);
+        return (r, File.ReadAllText(r.LogPath), clock.Elapsed);
+    }
+
+    /// <summary>A pause suspends the process, and the time it spends suspended doesn't count toward the stuck limit: item 16
+    /// is held for 5 s (a suspended Sleep doesn't run down its timeout), 10 s of pause during it.</summary>
+    [Fact]
+    public async Task A_paused_warm_does_not_count_the_pause_toward_the_stuck_limit()
+    {
+        if (await PausedInItem16("16,8000,5000") is not { } run) return;
+        var (r, log, _) = run;
+        Assert.Equal((WarmOutcome.Completed, 32L), (r.Outcome, r.Done));
+        Assert.DoesNotContain("is stuck", log);
+    }
+
+    /// <summary>An item that starts as the warm resumes, before the supervisor has counted the pause, and hangs is abandoned
+    /// within the limit of its start: item 16 is held for 5 s of wall time, so it returns as the 10 s pause ends, and item 17
+    /// never returns. Counted from its stamp, which carries the pause, it would take 10 + 8 s.</summary>
+    [Fact]
+    public async Task An_item_that_hangs_right_after_a_pause_is_found_within_the_limit()
+    {
+        if (await PausedInItem16("16,8000,5000,1") is not { } run) return;
+        var (r, log, after) = run;
+        Assert.Equal(WarmOutcome.Completed, r.Outcome);
+        Assert.Contains("drawing item 17", log);
+        Assert.DoesNotContain("drawing item 16", log);
+        Assert.True(after < TimeSpan.FromSeconds(14), $"ended {after} after the resume");
     }
 
     sealed class PackageKeyedVendor : IGpuVendorBackend

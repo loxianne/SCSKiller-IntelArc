@@ -299,10 +299,7 @@ public sealed partial class ScsKiller
             log($"{name}: the offline session's process {s.Pid} was never resumed: ended");
         }
         var dir = Path.GetDirectoryName(s.Exe)!;
-        var ledger = LedgerFile(s.Exe);
-        if (!Revoke(ledger, "[scskiller]\r\nnonce=\r\n"u8))
-            try { File.WriteAllText(ledger + ".revoked", ""); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        RevokeLedgers(s.Exe);
         var data = new HashSet<string>([.. RecorderDataFiles, Recordings.KeysFile], StringComparer.OrdinalIgnoreCase);
         // the folder's names, listed whole; null when it is gone or can't be read: nothing is known gone then
         HashSet<string>? Listed()

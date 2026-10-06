@@ -1,9 +1,146 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to the SCSKiller app and command line. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [1.2.3] - 2026-10-06
+
+### Added
+
+- "Closing the window quits SCSKiller" in Settings, off by default. On, the close button quits the way Quit in the
+  notification area does: a running compile finishes saving first, and a downloaded update installs if it is set to.
+- "Scan games when SCSKiller starts" in Settings, on by default. Off, SCSKiller shows the last list when it starts and
+  reads a game again only when you refresh, when the game exits, or when Steam or the Xbox app installs or updates one.
+- On NVIDIA, Unreal Engine 4.25 games (Returnal) compile their ray tracing shaders without a recording, with the root
+  signatures and collection layout 4.25 builds. Before, every ray tracing shader needed a recording, and those compiled in
+  play were most of Returnal's stutters after a compile.
+- "Install updates automatically" in About, on by default: a downloaded update installs the next time SCSKiller starts,
+  including when it starts with Windows, or when you quit it from the notification area. It waits while a compile, an
+  offline session or a game runs, and never installs during Windows' shutdown. "Restart to update" still installs it at
+  once, with the setting off, only that button does.
+
+### Fixed
+
+- Unreal games from the Xbox app (Dead Island 2) were compiled under a launcher stub, not the game's own exe: compile them again.
+- Dead Island 2's compile matched none of the pipelines the game creates: its engine was taken for Unreal 4.27, whose
+  root signatures differ from those of the 4.25 build it runs on. Compile it again.
+- Games from the Xbox app were never recorded: the recorder passed every launch through as "not armed", because Windows
+  names a packaged game's exe by its WindowsApps path, not the folder the Xbox app installed it to.
+- An Unreal game's crash reporter writing its symbol files into the game folder turned the recorder off until the next check.
+- Xbox app games with ReShade and RenoDX in the game's package folder, next to MicrosoftGame.config (Beast of
+  Reincarnation), weren't compiled: SCSKiller said it couldn't tell whether the game loads ReShade from there. Windows
+  loads it from that folder for an Xbox app game, so these games now compile through ReShade and RenoDX. A d3d12.dll
+  in that folder loads instead of the recorder, so the recorder stays out of such a game and the game page says why.
+- On Windows 10, a compile of a game that ships its own D3D12 runtime (the Agility SDK, a `D3D12` folder beside the
+  exe) could fail its pipelines with `replay of 'S' (pipeline stream) hr=0x80070057`: it ran on Windows' older D3D12,
+  which lacks shader model 6.6 and the newer pipeline settings the game uses. The compile now runs on the game's runtime.
+- Maximum mode's description said it saves well under 1 ms per pairing. It now says it seems to help most on AMD, and what it costs.
+- Monster Hunter Wilds and other RE Engine games could sit at "Building plan" for hours and then crash SCSKiller: with a
+  recording, the plan tried every pairing of a material's vertex and pixel shaders, though only pairs a recording has
+  seen can be compiled. It now pairs only those: PRAGMATA's plan takes 2-3 seconds and under 0.5 GB instead of 46 seconds and
+  5.7 GB, with the same pipelines.
+- A game page no longer shows a warning when the driver skips pipelines in a compile: the compile line says how many.
+- Every start read through every game's folders and DLLs again, even with nothing installed or updated: with many games
+  on a hard disk it ground for minutes after Windows started, and the list took up to 20 seconds to show. A start now
+  reads a game again only where something changed (its build, its exe, the files beside the exe), at low disk priority:
+  on a PC with 64 games it reads 50 MB instead of 830 MB and lists them in about a second. After an SCSKiller update the
+  list shows at once and the games are detected again in the background. The recorder's anti-cheat check no longer
+  walks every recorded game's folders every 2 minutes: it walks one when its folders change.
+- The Witcher 3 crashed at start with the recorder installed and frame generation on (FSR 3, with the Steam overlay):
+  the recorder's frame-time hook and the overlay's called each other until the game ran out of stack. Once FSR 3 or XeSS
+  frame generation is on, or OptiScaler's frame generation is set up, the recorder measures no frame times for that
+  launch, it still records.
+- A game with RenoDX and ReShade loaded by OptiScaler (ReShade64.dll with `LoadReshade=true` in OptiScaler.ini) compiles
+  through a copy of OptiScaler, ReShade and the HDR mod, and records. Before, it wasn't compiled. A game whose HDR mod
+  still blocks it names the case and its fix in one line: ReShade not next to the exe, ReShade under a name the game
+  doesn't load, LoadReshade off, or Luma.
+- With REFramework installed, RE Engine games (Monster Hunter Wilds) recorded nothing: REFramework makes the recorder
+  report its path as a copy in a `_storage_` folder, where it found no settings. It now records beside the game's exe.
+- A file a mod or the game writes beside the exe as it runs (a crash dump, a numbered log, a shader cache) no longer
+  stops the recorder until SCSKiller checks the folder again. A launch that still isn't recorded for a change says to
+  start the game again.
+- With a recording, an Unreal Engine 4.25 game (Returnal) compiled none of the ray tracing shaders it hadn't recorded:
+  its ray tracing collections have no state object config, which SCSKiller always added, so the recorded ones never
+  rebuilt and no rule was learned. They rebuild now, and Returnal's recording compiles its other 13,335 ray tracing
+  libraries.
+- More anti-cheat is recognised, so the recorder stays out of these games and comes out at the next check where it was
+  installed: Anti-Cheat Expert's and Tencent's other files (Delta Force), every HoYoverse game by its own exe and the
+  HoYoPlay launcher a Steam install carries (Zenless Zone Zero, whatever its anti-cheat driver is called in a version),
+  and EA Javelin's game service launcher. These games still compile from recordings and the community
+  database.
+- A Riot Games title added by hand (VALORANT) could get the recorder: Riot Vanguard installs outside the game's folder,
+  so SCSKiller found no anti-cheat there. Every Riot Games title (VALORANT, League of Legends and Teamfight Tactics,
+  Legends of Runeterra, 2XKO) is now anti-cheat by its exe and by its "Riot Games" folder, the recorder refuses to
+  record in them, and a recorder already in one comes out at the next check.
+- Turning the recorder on sometimes failed with "couldn't install: scskiller.ini is being used by another process", or
+  was turned off again at the next scan, when it came while SCSKiller converted a recording stored by SCSKiller 1.0.
+  The recorder now waits for the conversion.
+- An update downloaded before a restart now installs at the next start even when the PC has no network yet at sign-in.
+  Before, it waited for the update server to confirm it, and on a pre-release channel for the Patreon sign-in too, so
+  it often only showed "Restart to update" later.
+- When one update server asked SCSKiller to wait, every update check waited, on every channel, and "Check for updates"
+  only said so: GitHub limiting the stable feed also held back the internal and beta feeds, and the package server's
+  daily download limit held back the feeds. Only requests to that server wait now, the other feeds are still read, and a
+  newer update they offer still downloads. An update taken back from a pre-release feed is no longer kept for installing
+  just because the beta or alpha channel has no feed.
+- Adding a game by hand whose Unreal Engine is split into several DLLs (Returnal) picked a 32-bit Launcher.exe beside the
+  game and refused it as 32-bit. The game's own exe is added now, and neither a 32-bit program nor an installer beside a
+  pick is taken for the game.
+- An Unreal Engine game with a larger program beside its exe was found from a store as that program: a 32-bit launcher
+  (Returnal's Launcher.exe) or the Epic Online Services installer (Returnal on Steam). Its compiles went to the wrong
+  driver cache and the recorder was set up for that program, and adding it by hand from the exe in its main folder was
+  refused as 32-bit. The game's own -Win64-Shipping exe is found now, and installers and engine helpers beside it are
+  never taken for the game. Compile such a game again: the earlier compile went to the other program's cache.
+- Neverness to Everness showed as "Unreal Engine 5.5 · custom fork" and was read as its closed beta's engine. An
+  anti-cheat game's engine version comes from its game files, which can't tell 5.5 from 5.7, and of the two engine forks
+  named like the game SCSKiller took the beta's (5.5) over the release's (5.6). A fork named exactly like the game now
+  wins, from any version its files allow, the game shows as Unreal Engine 5.6.
+- FINAL FANTASY VII REMAKE INTERGRADE was taken for a DirectX 11 game, so it showed "not supported" on AMD and
+  compiled only DirectX 11 shaders on NVIDIA. Its engine starts DirectX 12 unless it's launched with -dx11. It's a
+  DirectX 12 game now: it asks for a recording, and compiles from it.
+- Dead Island 2 was taken for a DirectX 11 game. Its engine sets DirectX 12 in its own base config, which SCSKiller
+  didn't read, it reads it now for every Unreal Engine game, so a game whose engine defaults to DirectX 12 there is
+  recognised as DirectX 12 too.
+- Dead Island 2 couldn't be compiled: "none of the game's shader code decompresses". Its engine stores its shaders
+  compressed with Zstandard, and names that format in the shader library, which SCSKiller misread. All of its 53,648
+  shaders are read now.
+- Unreal Engine 4.25 games' shipped pipeline cache was skipped, so a few of the pipelines these games create themselves
+  weren't compiled (Returnal: 38 shader and root-signature pairs of 3,939). It's read now, and warmed games get their plans
+  rebuilt when the PC is idle.
+- On AMD, The Witcher 3 with ray tracing showed "Needs rebuilding: N new pipelines recorded" after every play session,
+  however often it was compiled. The game names its ray tracing pipelines anew each launch, and AMD's driver reuses one
+  only exactly as it was built, so no compile can prepare the next launch's. They're still compiled, but no longer count
+  as new.
+- On NVIDIA, a recorded pipeline whose shaders were all compiled before, in another pipeline, no longer counts as a new
+  pipeline: NVIDIA's driver compiles each shader once with its root signature, whatever the rest of the pipeline. In The
+  Witcher 3 these were about half of the new pipelines after each play session (cull modes, depth biases and new pairings
+  of known shaders), which kept the game at "Needs rebuilding" though a compile added nothing.
+- A game compiled without its ray tracing showed "Needs a 5-min recording" in orange. It shows as warmed now, with
+  "Ray tracing needs a 5-min recording" under it, and its page still offers the recording.
+- A game's page no longer stutters as it opens, and Clear cache asks at once: sizing Windows' shader cache read every
+  app's cache files. A second click on Clear cache while it waited closed SCSKiller.
+- An Unreal Engine game with a malformed shader stopped at "Reading shaders" with an error. That shader is skipped now
+  and counted as unparseable, as other malformed shaders already were.
+- Reading the shaders of an Unreal Engine game that keeps them in its material packages (Codename CURE II) could fill the
+  memory, and Windows then showed SCSKiller as not responding: it read as many large packages at once as the PC has
+  threads, each with all its shaders decoded. It reads packages within a share of the free memory now (2 GB at most)
+  and handles each shader as it's found.
+- A compile paused for over a minute failed when it resumed: every pipeline still compiling when it was paused looked
+  stuck to SCSKiller, which gave up after repeated faults. Likewise, a pause of over 10 minutes while a finished compile
+  was writing the driver cache cut that write short. The time a compile is paused no longer counts.
+- DRAGON BALL: Sparking! ZERO and other encrypted Unreal games whose key the scan missed now open without entering it.
+- Unreal games with ray tracing turned off no longer ask for a ray-tracing recording.
+- A compile could stop itself over and over with "stopped while <game> is running" when the game wasn't running:
+  SCSKiller took its own compile, which runs under the game's exe name, for the game whenever that process wasn't a
+  direct child of its compile helper. It recognises its own compile by the folder it runs from now.
+- On a CPU without AVX2, SCSKiller closed at "Reading shaders": the Oodle library it downloads to read Unreal Engine
+  and FromSoftware games' files needs AVX2 and BMI2. On such a CPU it reads Oodle-compressed files without that library
+  now, and Oodle data that still can't be read says that the CPU lacks AVX2/BMI2.
+- One game with a file dated past what .NET can read failed the whole scan with "Not a valid Win32 FileTime", so no
+  game was listed. That game now shows the error, its recorder stays as it was until it can be read again, and every
+  other game scans.
 
 ## [1.2.2] - 2026-10-04
 

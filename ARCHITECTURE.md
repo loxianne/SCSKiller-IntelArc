@@ -22,8 +22,12 @@ session), plans which pipelines to create, and replays them in a separate proces
 
 ## How it works
 
-1. **Discover.** An `IGameSource` per store finds installed games and flags anti-cheat. `ManualSource` lists the games
-   the user added by their exe (`manual-games.json` in the data folder): the pick is resolved like a store's install
+1. **Discover.** An `IGameSource` per store finds installed games and flags anti-cheat. Whatever exe a store or the user
+   names, an Unreal game's is its `<Name>-<Platform>-Shipping.exe` in `<Project>\Binaries\<Platform>` (Win64, WinGDK,
+   WinGRTS) in an install with an `Engine` folder, never a bootstrap stub or launcher: the one such build there is, else
+   the one the named exe's name ties; tools and servers never (`GameFiles.GameExe`, applied to every game discovery lists,
+   its pick kept in `discovered.json` while the store's build and the install root's entries are unchanged).
+   `ManualSource` lists the games the user added by their exe (`manual-games.json` in the data folder): the pick is resolved like a store's install
    (a launcher stub to its Shipping exe) and a game folder is suggested from its layout (above `Engine\` or `bin\`, else
    the exe's folder; nothing above it is read, since the folders beside it may be other games). The user confirms or
    changes that folder; a drive, a store's or Windows' folder of many games, a folder holding a game SCSKiller lists,
@@ -31,14 +35,27 @@ session), plans which pipelines to create, and replays them in a separate proces
    the game follows the recorder rules of any game: the anti-cheat check covers that whole folder and the exe's
    folder, plus the names directly in each folder above it up to a drive or a folder of many (a confirmed `win64`
    still sees the `BattlEye` folder beside it), and the recorder is armed only for the folder that was checked. A new or renamed file disarms it
-   until the next clean check unless it is of a data type (`ScsKiller.DataTypes`: a log, an ini, a screenshot, a save)
-   and doesn't start with "MZ"; so do anything named like an anti-cheat marker, a folder moved in with contents and a
-   changed exe. A launch the proxy passes through leaves
+   until the next clean check unless its type is one anti-cheat never ships as (`ScsKiller.DataTypes`: logs, settings
+   and presets, images, saves, dumps, shader caches, debug symbols; by name only) or it is in a `sym` folder (the symbol
+   store an Unreal crash reporter's debugger fills with copies of system dlls); anything named like an anti-cheat marker, a folder
+   moved in with contents and a changed exe disarm it too. A launch the proxy passes through leaves
    its reason beside the exe's ledger entry (`<entry>.refused`), which the game's page shows. An entry from before the
    folder could be confirmed isn't recorded until it is. It yields to a store's
    game whose install holds its exe, has no build id (the exe's size and write time mark a patch), starts its exe
    directly, uploads nothing and fills no middleware pack (the upload key is a public store build alias, which a game
    added on one PC doesn't have). Removing it takes its recorder out and forgets the entry.
+   A scan reads again only what changed since an earlier one, at background I/O priority unless the user asked for it:
+   a Steam or Xbox game keeps its exe while its build is the same (`discovered.json`); each game keeps its engine and
+   anti-cheat verdict while its exe, store build and SCSKiller build are the same (`scan.json`; another SCSKiller
+   build's is shown at once and the game detected again in the background); the DLLs beside the exe are known by their
+   size, write time, NTFS change time and file id (`middleware.json`, `reshade.json`; a DLL's hash also by its first
+   and last 4 KB), which a refresh the user asks for doesn't trust. An install is walked for anti-cheat in full when the
+   entries of its root or exe folder changed since its last clean walk (the recorder's own files and data files aside),
+   or since its install watcher saw a file created or renamed or the recorder was disarmed (either forgets the clean
+   walk; one that ran across such a change isn't kept); otherwise only those entries are checked.
+   With `Settings.ScanAtStart` off, a scan the user didn't ask for shows the last list (`games.json`, kept by every scan
+   and every game's exit) and lists again only Steam's, the Xbox app's and the user's games, reading one again only
+   when it isn't the one listed; another SCSKiller build or GPU driver scans as usual.
 2. **Index.** An `IEngineReader` per engine family detects the engine and lists every shader the build ships (stage,
    SHA-1, signatures, root signature if embedded), grouped in shader maps that say which shaders can be drawn together.
 3. **Plan.** The planner (`IPlanner`) turns the index, a recording if there is one, and the GPU vendor's `VendorCaps`
@@ -150,8 +167,13 @@ pipelines, not taken from documentation. `VendorCaps` holds the result per vendo
 - After a driver update, no D3D12 cache file older than the install remains, which is why SCSKiller recompiles after
   one.
 - The D3D12 runtime version is not part of the key: pipelines compiled under the system runtime hit under a game's
-  Agility SDK runtime and the reverse. The warm uses the system runtime. A game's Agility runtime older than the system's
-  isn't loaded at all: the loader takes the newer one.
+  Agility SDK runtime and the reverse. The warm runs on the game's Agility runtime when the game ships one
+  (`scskiller_warm --d3d12`: the Agility SDK DLLs of the folder the game exe's `D3D12SDKPath` export names, a relative
+  path inside the exe's folder, are staged as `D3D12\` next to the warm's exe, which exports `D3D12SDKVersion` set to
+  that `D3D12Core.dll`'s version), else on the system's. A runtime that can't be staged or makes no device leaves the
+  system's. An older system runtime (Windows 10's: no SM 6.6, none of the newer pipeline subobjects) rejects pipelines
+  a game recorded on its own with E_INVALIDARG. A game's Agility runtime older than the system's isn't loaded at all:
+  the loader takes the newer one. The warm's log names the `D3D12Core.dll` it runs on.
 - Cached creates take about 0.2-1 ms, cold ones 6-70 ms. A warm replays roughly 450-1350 PSOs a second on 30 threads.
 - **A compute PSO using inline ray tracing (RayQuery) is never a full hit**: once cached (by a warm, the game or an
   earlier create in the same process) it still costs about 7-15% of its cold create, 9-35 ms for an Unreal 5.6
@@ -267,10 +289,10 @@ open game files read-only and never launch or attach to the game.
 
 - **Unreal Engine** (`Unreal/`): shader libraries and shader maps through CUE4Parse, including the version-1 archives of
   UE 4.20/4.21 (`UnrealReader.OpenV1`) and games that keep shaders inline in their packages. Encrypted paks need the
-  game's AES key (`aes.key`, given by the user). A shipped pipeline cache (`*.stable.upipelinecache`, file versions
-  22-28, `StablePipelineCache`) names each PSO's shaders by their library hash; every graphics PSO becomes one exact
-  shader map, so the planner pairs those shaders as the game does (global and post-process passes that no signature
-  match pairs). They are left out of the index's content hash.
+  game's AES key (`aes.key`, given by the user). A shipped pipeline cache (`*.stable.upipelinecache`, file versions 17
+  (UE 4.25) and 22-28, `StablePipelineCache`) names each PSO's shaders by their library hash; every graphics PSO
+  becomes one exact shader map, so the planner pairs those shaders as the game does (global and post-process passes
+  that no signature match pairs). They are left out of the index's content hash.
 - **Unity** (`Unity/`): Shader objects in serialized files and UnityFS bundles. Their compiled programs are one LZ4 blob
   per platform; the reader finds the blob by its shape and carves it, which avoids depending on each Unity version's
   serialized layout. Windows builds ship DXBC for the `d3d11` platform, which both the D3D11 and D3D12 players
@@ -334,6 +356,10 @@ name:
   `RootSig.SpaceBindlessTables`);
 - a raised MAX_SRVS when a shader binds more SRVs than the stock table (`RootSig.MaxSrvsFor`).
 
+The rule follows the engine version, which a fork named like the game (a CUE4Parse `EGame`) sets to its base. A fork on
+an older engine than its containers tell keeps its base (`UnrealReader.OlderBase`): Dead Island 2 is Dambuster's 4.25 in
+4.27's IoStore containers, and its root signatures carry 4.25's static samplers (s1000-s1005 in space 0).
+
 REDengine 3 has three root signatures, chosen by the pipeline's stages (`RootSig.Rule.Red3`): compute, VS (+ PS), and with
 a GS, HS or DS a wider one; The Witcher 3's recording uses them for all 586 PSOs of its own shaders. Only the stage sets
 it confirms get one (`RootSig.Red3Validated`); any other is left out.
@@ -357,7 +383,8 @@ DXIL's own bindings for every War Thunder shader.
 `confirmed-engines.json`, embedded, plus the entries of the copy the server serves as a content file); any other gets
 the source-derived rule and the note "not tested on this engine version yet". With a recording, the rule is checked
 against it first, and the
-planner falls back to a lookup learned from the recording when it doesn't rebuild.
+planner falls back to a lookup learned from the recording when it doesn't rebuild, keyed on each stage's resource counts: `StageSets` then
+pairs only shaders whose counts (for VS → PS, whose two counts together) a recorded PSO has, as no other pair resolves (not with pooled global maps).
 
 ### Stage sets and the pre-emit guard
 
@@ -392,7 +419,7 @@ seeded with the recording's own units.
 
 Where the vendor caches per collection (NVIDIA), `RtCollections` synthesizes one collection per DXIL library, with the
 engine's global and local root signatures rebuilt from the library's resource counts and its RDAT function table.
-Rules exist for UE 4.26/4.27, UE 5.0-5.4 and the forks the root-signature rules cover; with a recording, its collections'
+Rules exist for UE 4.25 (its collections have no state object config), UE 4.26/4.27, UE 5.0-5.4 and the forks the root-signature rules cover; with a recording, its collections'
 rule is used if at least 99% of them rebuild. The UE 5 rule is 5.1's (verified on Oblivion Remastered; 5.4 with
 MAX_SAMPLERS' 32-sampler table) and applies only when the libraries have 5.1's binding shape
 (`RtCollections.Ue5ShapeMismatch`): uniform buffers in space 1, hit-group index and vertex buffers t0/t1 in space 2, no
@@ -488,8 +515,11 @@ After a build:
   serve passes a game may never run, such as path tracing (`ScsKiller.RtInlineCovers`). The libraries stay counted as
   uncovered, the reason says only a recording compiles them, and a recorded state object takes the DXR path. A plan
   from before this was counted that asks for a recording is planned again by the plan check. An Unreal game whose
-  Windows device profile sets r.RayTracing.AllowPipeline=0 (`UnrealRhi.RtPipelinesOff`, `EngineInfo.NoRtPipelines`)
-  never builds a state object: its libraries count, none as uncovered.
+  Windows device profile sets r.RayTracing.AllowPipeline=0 (`UnrealRhi.RtPipelinesOff`), or whose config turns ray
+  tracing off (`UnrealRhi.RayTracingOff`, `EngineInfo.NoRayTracing`: r.RayTracing off as the Engine ini hierarchy and
+  the user's Engine.ini resolve it, and nothing that outranks it, such as [SystemSettings], ConsoleVariables.ini, a
+  device profile or the launch options, sets it otherwise), never builds a state object (`EngineInfo.NoRtPipelines`):
+  its libraries count, none as uncovered, and a plan that asked for a recording is planned again.
   On AMD this always applies, since only recorded objects can be warmed. The plan's uncovered count
   (`PlanStats.RtUncovered`) is the libraries in neither a synthesized collection nor a recorded state object, also when
   the recording has ray tracing; the game page shows it.
@@ -504,14 +534,21 @@ After a build:
   ending) and NVAPI state (the last 'N' of the recordings' union, as the warm replays it), keyed by the SHA-1 of the two:
   NVIDIA's key leaves export names out and holds the NVAPI state. The input carries its records' keys: a crash names
   one, and a key file from before identities, which holds them, takes the identity whatever state it was warmed under
-  until the next warm. AMD caches a whole state object, so there each record is one. The warm's key file holds the same reading of what
+  until the next warm. AMD caches a whole state object and hits only an exact repeat of it and its `AddToStateObject`
+  chain, so there each record is one, except a record no later launch creates again, which is none: one with a `_LRS_`
+  alias (`PsoDb.HasLaunchAlias`), or one whose base or linked collection is such a record. The warm replays those too
+  and logs how many. On NVIDIA a recorded pipeline (not a ray tracing one) is one input per stage, keyed by the SHA-1 of
+  the stage, its shader, the root signature and the NVAPI state, carrying the keys of the records that have it: NVIDIA
+  compiles each stage on its own and leaves fixed-function state and the other stages out of its key
+  (`UnitPolicy.Nvidia`), so another cull mode or pairing of stages compiled before is nothing new. One with a stream
+  output declaration is one input by its key. The warm's key file holds the same reading of what
   it compiles, taken as it starts and never again: the recordings as it prepares them (imports and community downloads wait meanwhile), and its
   plan. What counts is each input the key file lacks, or holds without a blob that is at hand now (losing one doesn't
-  count), less the pipelines that crash this driver. Of that, the plan's planner-made records (its key
+  count), less the pipelines that crash this driver, each pipeline once (its first record). Of that, the plan's planner-made records (its key
   file) are, after a newer planner rebuilt the plan, "SCSKiller can now compile N more pipelines"; otherwise they add to
   "N new pipelines; compile again to include them" ("recorded" when all are); their sum is the new-shaders
   notification's count. The result is cached on every input (each by size, write time and a hash of its first and last
-  4 KB). A key file is read only when its contents hash to its name; one damaged, missing or unreadable, or none (a
+  4 KB), in memory and in the game's record for the next start. A key file is read only when its contents hash to its name; one damaged, missing or unreadable, or none (a
   warm from before warms kept one), is an unknown baseline, under which everything counts and the game
   is Stale ("compile again: what the last compile replayed is no longer known"). Key files are written, and the plan and
   warm ones the stored record doesn't name deleted once an hour old with the temp files of their interrupted writes,
@@ -525,11 +562,15 @@ After a build:
 
 The recorder is `proxy/`'s `d3d12.dll`, placed next to the game's exe with a `scskiller.ini`. It forwards to the system
 `d3d12.dll` and records every pipeline, root signature and ray tracing state object the game creates into
-`scskiller.db`, with timings in [`scskiller_creates.csv`](#scskiller_createscsv).
+`scskiller.db`, with timings in [`scskiller_creates.csv`](#scskiller_createscsv). It reads `scskiller.armed` and
+`scskiller.ini`, checks for anti-cheat markers and writes its files in its own folder, as the loader reports it. When a mod
+rewrites that path (REFramework names a copy under `_storage_`), it uses the exe's folder instead, but only if the mapped
+image (the kernel's name for it) is the same file, by volume and file id, as `<exe folder>\<its name>`.
 
 - **Where it's installed** (`ReconcileRecorders`, app only): in every compatible game when "Record in all compatible
   games" is on, unless the game's own switch says otherwise. Compatible means D3D12, supported, no anti-cheat of any
-  kind, no foreign `d3d12.dll` (unless chained, below), and a folder writable without elevation. A running game's
+  kind, no foreign `d3d12.dll` (unless chained, below), none in an Xbox app game's package root (Windows loads that one
+  before the exe's folder, so the recorder never would), and a folder writable without elevation. A running game's
   folder is left alone until it exits: every write there (the proxy, the ini, the keys file, the inbox's rotation, a
   removal) checks first that the game isn't running (`GameFolderWrite`, the watcher and the uninstall hook the same
   way): no process named like an exe of its install root or exe folder, so also one a launcher started under another
@@ -588,7 +629,8 @@ The recorder is `proxy/`'s `d3d12.dll`, placed next to the game's exe with a `sc
   `'W'` records, the records they name as the driver's, their `'N'` and the root signatures only those name are never
   uploaded (`HashOnly.Canonical`) nor put in a middleware pack. `Recordings.Layered` counts a recording's `'W'`
   records: the game's creates a layer changed and the layer's own. OptiScaler, Special K
-  (they pick their role from their file name) and vkd3d-proton (it runs the game on Vulkan) are refused.
+  (they pick their role from their file name) and vkd3d-proton (it runs the game on Vulkan) are refused as the chained
+  d3d12.dll; OptiScaler as dxgi.dll (or another name it supports) runs beside the recorder.
 - **Offline session** (`ScsKiller.StartOfflineSession`, app only): the one case where the recorder goes into an
   anti-cheat game. Offered (`GameState.OfflineEligible`) only for a game of `Games/offline-eac.json` (Steam ids, the exe
   each is discovered with, sources; embedded, never served): EasyAntiCheat games that run offline without it when their
@@ -656,8 +698,12 @@ The recorder is `proxy/`'s `d3d12.dll`, placed next to the game's exe with a `sc
   `mods::shader::OnCreatePipelineLayout(will insert` or layout cloning); else by its build folder in
   `Games/shader-mods.json` (its file name, or its version resource's OriginalFilename); else, as is an add-on that can't
   be read, ReplacesShaders. A game with either kind (`GameState.ShaderMod`) whose layer a copy reproduces
-  (`ReShadeInstall.Copyable`: ReShade in the exe's own folder under a name the game loads by itself, dxgi.dll, d3d12.dll,
-  d3d11.dll, d3d10.dll, d3d9.dll, opengl32.dll, dinput8.dll or the recorder's chain name, and no Luma add-on, whose
+  (`ReShadeInstall.Copyable`: ReShade in the exe's own folder, or in an Xbox app game's package root (its install folder,
+  with MicrosoftGame.config, which Windows searches first), under a name the game loads by itself, dxgi.dll, d3d12.dll,
+  d3d11.dll, d3d10.dll, d3d9.dll, opengl32.dll, dinput8.dll or the recorder's chain name, or ReShade64.dll beside an
+  OptiScaler the game loads by itself (dxgi.dll or d3d12.dll; winmm, version, dbghelp, wininet or winhttp.dll when the
+  exe imports it) whose OptiScaler.ini sets `[Plugins] LoadReshade=true`, as OptiScaler then loads it from the exe's
+  folder; and no Luma add-on, whose
   shader files a copy leaves out) compiles through a copy of its layer: as each warm process starts,
   `ScsKiller.LayerFor` copies ReShade's DLL (as dxgi.dll, whatever its name in the game),
   the enabled add-ons that change pipelines and ReShade.ini without `[ADDON] AddonPath` and `[INSTALL] BasePath` into
@@ -669,13 +715,20 @@ The recorder is `proxy/`'s `d3d12.dll`, placed next to the game's exe with a `sc
   name, size and write time); a game whose layer differs from it now is Stale, and a stopped compile resumes only
   through the layer it stopped in (`GameRecord.ResumeLayer`), else it starts over. With ReShade installed as d3d12.dll,
   the recorder's own name, the warm copies it the same way, and the recorder records under it only when the user
-  chains it ("Record alongside ReShade"); the game page says so. Any other layer (ReShade only in the install root above
-  the exe, an .asi, ReShade64.dll or a renamed DLL another loader may or may not pick up, Luma) a copy can't reproduce:
-  a LayoutInjecting add-on in it
-  (`GameState.ShaderModBlocks`) makes the game Unsupported with the reason shown, never queued, planned, compiled or
-  shared, checked again right before each warm starts, and the recorder taken out at once (`TakeOutNow`) and kept out;
-  a ReplacesShaders one only adds a note, and the game compiles without the layer. Each file is read once per
-  size and write time, up to 128 MB; anti-cheat installs aren't read.
+  chains it ("Record alongside ReShade"); the game page says so. ReShade64.dll that OptiScaler loads is copied with the
+  whole chain, as OptiScaler's settings can change the game's root signatures (`MipmapBiasOverride` rewrites static
+  samplers): OptiScaler as dxgi.dll, ReShade64.dll, the FidelityFX, XeSS and NGX libraries OptiScaler loads (from its
+  OptiDllPath folder when that stays inside the exe's folder, else `OptiScaler\`, else beside the exe; PE files only, up
+  to 128 MB each and 512 MB in all), and OptiScaler.ini without `[Libraries]` paths, `[Plugins] Path` and
+  `[Log] LogFileName`, with `[Hotfix] CheckForUpdate=false`, so it loads and writes only in the stage and makes no
+  network request; an OptiScaler.ini with a section header that isn't a whole `[name]` on its line blocks the game, as
+  SimpleIni may read such a header across lines. OptiScaler and its ini are part of what the warm depends on. Any other layer
+  a copy can't reproduce (`ReShadeInstall.Block`: Luma; ReShade only in another store's game's install root above
+  the exe; ReShade64.dll beside an OptiScaler that doesn't load it; an .asi, ReShade64.dll or a renamed DLL another loader
+  may or may not pick up): a LayoutInjecting add-on in it (`GameState.ShaderModBlocks`) makes the game Unsupported with that case and its
+  fix as the reason, never queued, planned, compiled or shared, checked again right before each warm starts, and the
+  recorder taken out at once (`TakeOutNow`) and kept out; a ReplacesShaders one only adds a note, and the game compiles
+  without the layer. Each file is read once per size and write time, up to 128 MB; anti-cheat installs aren't read.
 - **Import** (`Recordings`): the game folder's `scskiller.db` is an inbox. When it changed since the last import
   (`GameRecord.RecordingInbox`, its size and write time), its records are merged into `recording.db` by record key,
   after the ones already there. Once `recording.db` is written, the inbox is emptied, but only while nothing has it
@@ -738,7 +791,14 @@ The recorder is `proxy/`'s `d3d12.dll`, placed next to the game's exe with a `sc
   milliseconds. The file holds the last launch that presented, replaced at its first frame (3 hours at 300 FPS is
   13 MB; a launch stops writing at 32 MB). It isn't part of the recording: not in the recording limit or the recording's
   size, never shared; Clear recording and removing the recorder delete it with the csv. `frames=0` in `scskiller.ini` turns it off (diagnostics
-  only). The game page's last session (`GameState.LastFrames`) reads the last launch with the creates csv of the
+  only). Frame generation turns it off for the rest of the launch: with its swap chain, Steam's overlay and the `Present`
+  hook call each other until the stack overflows. FSR 3's (also under OptiScaler and dlssg-to-fsr3) and XeSS's are made on
+  a present queue named before the create (`AMD FSR PresentQueue`, `XefgInterpolationSwapChain::present_queue_`): a
+  `CreateSwapChain*` on such a queue puts the original `Present` / `Present1` back before the swap chain is made (by
+  compare-exchange: a slot another hook took after ours is left), and hooks nothing more. `OptiScaler.ini` beside the exe
+  with its frame generation on hooks nothing at all, since OptiScaler as `dxgi.dll` can make that swap chain through a
+  factory the recorder doesn't hook: `[FrameGen]` `Enabled=true` with `FGOutput` other than `auto` / `nofg`, or in older
+  versions `FGType` `nukems`, or `FGType` `optifg` (its default) with `[OptiFG]` `Enabled=true`. Each `CreateSwapChain*` logs its queue's name. The game page's last session (`GameState.LastFrames`) reads the last launch with the creates csv of the
   same launch (the `#session` with the same stamp; from an older recorder, without `#clock`, the only one within 10 s, else none). A frame
   is **cold-filled** when its overlapping compiles of 100 ms or more (not a library load or a RayQuery PSO at the
   floor) sum to half its length or more: a compiled run's load creates stay under
@@ -845,7 +905,7 @@ A driver fault or hang in a ray tracing state object never stops the warm or ski
   then starts a new process from `from` with a quarter of the ray tracing threads (32 → 8 → 2 → 1). Only an object that
   faults with one ray tracing thread counts as failed, and later processes skip it (`--skip`).
 - A worker stuck in one item for over 60 s (2 s once stopping) is abandoned; a stuck PSO counts as failed and a new
-  worker carries on, at most 8 times.
+  worker carries on, at most 8 times. Time the process spends suspended (a pause) doesn't count.
 - **A removed device** (`DXGI_ERROR_DEVICE_REMOVED`) makes every later create in that process fail. The replay checks
   `GetDeviceRemovedReason` after a failed create and every 100 ms; once removed, it takes no more items and ends with
   a `retry` line whose `reason` is `removed`. The items whose create failed on the removed device are the suspects: one
@@ -856,7 +916,8 @@ A driver fault or hang in a ray tracing state object never stops the warm or ski
   skips them in every later compile on that driver, and reports them apart ("N skipped (they crash the GPU driver)").
   A compile on another driver gives each one retry.
 - After its last line the child signals `Local\SCSKiller.Final.<scskiller_warm's pid>` (created before the child
-  starts); if it hasn't exited `SCSKILLER_WARM_EXIT_S` (default 600) seconds later, it's terminated and the run returns 3.
+  starts); if it hasn't exited `SCSKILLER_WARM_EXIT_S` (default 600) seconds later, not counting a pause, it's terminated
+  and the run returns 3.
 
 ### D3D11 items
 

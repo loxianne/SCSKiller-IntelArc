@@ -46,6 +46,8 @@ public static class Format
         return s.Status switch
         {
             GameStatus.Warmed when partly => $"Driver {s.WarmedDriverVersion} · {s.Careful!.LaunchCompiled * 100:0}% still compiled",
+            GameStatus.Warmed when ScsKiller.RtAfterRecording(s) => s.RecorderInstalled ? "Recorder on: play with ray tracing"
+                : ScsKiller.RecordedEnough(s) ? "Ray tracing needs a recording" : "Ray tracing needs a 5-min recording",
             GameStatus.Warmed => $"Driver {s.WarmedDriverVersion}" + (ScsKiller.IsPartial(s.Plan) ? " · partly covered" : ""),
             GameStatus.Stale => StaleNote(r),
             GameStatus.NeedsRecording when s.RecordingPaused => "Recording paused: limit reached",

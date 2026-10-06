@@ -90,6 +90,34 @@ public class AccountTests : IDisposable
         Assert.Equal(Com, routes.Current);
     }
 
+    /// <summary>A request that started on the fallback and answers after the probe put the primary back leaves the
+    /// primary first (the probe's verdict), however the two interleave.</summary>
+    [Fact]
+    public async Task A_request_on_the_fallback_that_ends_after_a_good_probe_keeps_the_primary()
+    {
+        var comDown = true;
+        var held = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hold = false;
+        var fake = new Fake((r, _) => IsCom(r) ? comDown ? throw Down : Task.FromResult(Ours()) : hold ? held.Task : Task.FromResult(Ours()));
+        var routes = Routes(fake);
+        await Get(routes);   // failed over: the fallback is first
+        Assert.Equal(Io, routes.Current);
+
+        comDown = false;
+        hold = true;
+        _clock.Now += TimeSpan.FromMinutes(31);
+        var onFallback = Get(routes);   // starts the probe and goes to the fallback, which answers only after the probe
+        await routes.Probe;
+        Assert.Equal(Com, routes.Current);
+        held.SetResult(Ours());
+        await onFallback;
+        Assert.Equal(Com, routes.Current);
+        fake.Log.Clear();
+        hold = false;
+        await Get(routes);
+        Assert.Equal(["GET https://api.test.com/v1/x"], fake.Log);
+    }
+
     [Fact]
     public async Task Failover_skips_a_route_error_page_but_not_our_own_answers()
     {

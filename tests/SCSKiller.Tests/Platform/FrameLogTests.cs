@@ -483,4 +483,28 @@ public class FrameLogTests(ITestOutputHelper output) : IDisposable
         foreach (var h in r.Hitches) output.WriteLine($"  {h.At:mm\\:ss\\.f} {h.Ms,8:0.0} ms {h.Cause}");
         Assert.True(r.Frames > 0);
     }
+
+    /// <summary>An hour at 300 fps (the recorder's file is a few MB; a full benchmark is a few minutes) with 41,000 creates:
+    /// the game page's report and its graph columns in well under its budget (measured about 0.15 s).</summary>
+    [Fact]
+    public void An_hour_of_frames_reads_within_its_budget()
+    {
+        var rnd = new Random(1);
+        var ends = new List<double>(1_080_001) { 0 };
+        for (int i = 1; i <= 1_080_000; i++) ends.Add(ends[^1] + (i % 2000 == 0 ? 80 + rnd.Next(200) : 3.33));
+        var bin = Path.Combine(_dir, FrameLog.FileName);
+        File.WriteAllBytes(bin, Launch(1_000_000, 0, ends));
+        var csv = Path.Combine(_dir, "scskiller_creates.csv");
+        File.WriteAllLines(csv, ["#session,1000000,Game.exe", "#clock,0",
+            .. Enumerable.Range(0, 41_000).Select(i => FormattableString.Invariant($"{i * 87.8:0.0},S,1,1,{(i % 10 == 0 ? 40 : 1.2):0.000},{i:x40},0.010,7,0"))]);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var r = FrameLog.Read(bin, csv, "Game.exe")!;
+        clock.Stop();
+        output.WriteLine($"{clock.ElapsedMilliseconds} ms, {r.Frames:N0} frames, {r.Hitches.Count} hitches");
+        Assert.Equal(1_080_000, r.Frames);
+        Assert.Equal(FrameLog.GraphColumns, r.Peaks.Count);
+        Assert.InRange(r.Peaks.Max(), 80, 280);   // each column keeps its longest frame: no spike averaged away
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"{clock.ElapsedMilliseconds} ms");
+    }
 }

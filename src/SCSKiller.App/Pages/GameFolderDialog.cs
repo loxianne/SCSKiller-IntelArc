@@ -66,6 +66,6 @@ static class GameFolderDialog
             await Check();
         };
         await Check();
-        return await dialog.ShowAsync() == ContentDialogResult.Primary ? folder : null;
+        return await App.ShowAsync(dialog) == ContentDialogResult.Primary ? folder : null;
     }
 }

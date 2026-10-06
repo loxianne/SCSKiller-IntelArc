@@ -11,23 +11,25 @@ public static class StablePipelineCache
 
     public sealed record Pso(uint Key, PsoType Type, string[] Shaders);
 
-    const ulong Magic = 0x5049504543414348, TocMagic = 0x544F435354415232, EofMagic = 0x454F462D4D41524B; // PIPECACH, TOCSTAR2, EOF-MARK
+    const ulong Magic = 0x5049504543414348, TocMagic = 0x544F435354415232, TocMagic17 = 0x544F435354415254, EofMagic = 0x454F462D4D41524B; // PIPECACH, TOCSTAR2, TOCSTART, EOF-MARK
 
     /// <summary>File versions 22 (LastUsedTime) to 28 (AddingDepthBounds) share this header and TOC layout; between them only
-    /// the PSO bodies change, of which this reads the type alone. Null: not such a file.</summary>
+    /// the PSO bodies change, of which this reads the type alone. Version 17 (Subpass, UE 4.25) has the TOCSTART table: no
+    /// guid shared by every entry, no last used time per entry. Null: not such a file.</summary>
     public static List<Pso>? Read(ReadOnlySpan<byte> b)
     {
         try
         {
-            if (b.Length < 57 || U64(b, 0) != Magic || U32(b, 8) is < 22 or > 28 || U64(b, b.Length - 8) != EofMagic) return null;
+            if (b.Length < 57 || U64(b, 0) != Magic || U32(b, 8) is not (17 or (>= 22 and <= 28)) || U64(b, b.Length - 8) != EofMagic) return null;
             var o = checked((int)U64(b, 33)); // after magic, version, game version, u8 platform, guid
-            if (U64(b, o) != TocMagic) return null;
+            var v17 = U32(b, 8) == 17;
+            if (U64(b, o) != (v17 ? TocMagic17 : TocMagic)) return null;
             o += 8;
-            o += b[o] != 0 ? 17 : 1; // every entry's guid, once
+            if (!v17) o += b[o] != 0 ? 17 : 1; // every entry's guid, once
             o += 4; // sort order
             var n = BinaryPrimitives.ReadInt32LittleEndian(b[o..]);
             o += 4;
-            if (n < 0 || n > b.Length / 94) return null; // an entry is 94 bytes at least
+            if (n < 0 || n > b.Length / (v17 ? 86 : 94)) return null; // an entry is 86 or 94 bytes at least
             var psos = new List<Pso>(n);
             for (var i = 0; i < n; i++)
             {
@@ -39,7 +41,7 @@ public static class StablePipelineCache
                 if (k is < 0 or > 8) return null; // a PSO has at most five stages
                 var shaders = new string[k];
                 for (var j = 0; j < k; j++) shaders[j] = Convert.ToHexStringLower(b.Slice(o + 20 * j, 20));
-                o += 20 * k + 8 + 2 + 8; // shaders, usage mask, engine flags, last used time
+                o += 20 * k + 8 + 2 + (v17 ? 0 : 8); // shaders, usage mask, engine flags, last used time
                 psos.Add(new Pso(key, (PsoType)U32(b, body), shaders));
             }
             return o == b.Length - 8 ? psos : null;

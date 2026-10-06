@@ -23,15 +23,25 @@ public static class InlineShaders
     /// the entry layout (<see cref="Decode"/> takes both), and its FShaderCode (container + UE's optional-data trailer).</summary>
     public readonly record struct Entry(int Map, int Offset, char Format, byte[] Code);
 
-    /// <summary>The shaders in a package's bytes. <paramref name="undecoded"/>: entries of maps that hold D3D shaders but
-    /// didn't decode themselves (should be 0; maps with no D3D shader at all are other platforms', e.g. Vulkan, or false
-    /// anchors, and are dropped).</summary>
-    public static List<Entry> Carve(byte[] d, out int undecoded)
+    /// <summary>Calls <paramref name="found"/> with each shader in a package's files (.uasset, then .uexp), one at a time:
+    /// offsets and map numbers run on across the files as in their concatenation (no entry spans the header/export
+    /// boundary). Returns the entries of maps that hold D3D shaders but didn't decode themselves (should be 0; maps with no
+    /// D3D shader at all are other platforms', e.g. Vulkan, or false anchors, and are dropped).</summary>
+    public static int Carve(IReadOnlyList<byte[]> parts, Action<Entry> found)
     {
-        var found = new List<Entry>();
+        int undecoded = 0, map = 0, bias = 0;
+        foreach (var d in parts)
+        {
+            undecoded += Carve(d, bias, ref map, found);
+            bias += d.Length;
+        }
+        return undecoded;
+    }
+
+    static int Carve(byte[] d, int bias, ref int map, Action<Entry> found)
+    {
         var blocks = new List<(int Start, int End)>();
-        undecoded = 0;
-        var map = 0;
+        var undecoded = 0;
         for (var p = 0; p + 8 <= d.Length; p++)
         {
             var k = I32(d, p);
@@ -41,11 +51,11 @@ public static class InlineShaders
                 var q = p + 4 + (long)h * k;
                 if (q + 4 > d.Length || I32(d, (int)q) != k || Chain(d, (int)q + 4, k) is not { } entries) continue;
                 map++;
-                var before = found.Count;
+                var decoded = 0;
                 foreach (var (off, fmt) in entries)
-                    if (Decode(d, off, fmt) is { } code) found.Add(new(map, off, fmt, code));
-                if (found.Count == before) continue; // a false anchor may overlap a real one: keep scanning inside it
-                undecoded += entries.Count - (found.Count - before);
+                    if (Decode(d, off, fmt) is { } code) { decoded++; found(new(map, bias + off, fmt, code)); }
+                if (decoded == 0) continue; // a false anchor may overlap a real one: keep scanning inside it
+                undecoded += entries.Count - decoded;
                 var end = Layout(d, entries[^1].Off, entries[^1].Fmt).Len + entries[^1].Off;
                 blocks.Add((p, end));
                 p = end - 1;
@@ -54,8 +64,8 @@ public static class InlineShaders
         }
         for (var i = d.AsSpan().IndexOf((byte)0x78); i >= 0; i = d.AsSpan(i + 1).IndexOf((byte)0x78) is var j and >= 0 ? i + 1 + j : -1)
             if (i >= 4 && Layout(d, i - 4, 'Z').Len > 0 && !blocks.Any(b => i >= b.Start && i < b.End) && Decode(d, i - 4, 'Z') is { } code)
-                found.Add(new(0, i - 4, 'Z', code)); // (a zlib-compressed 'A' entry has the same shape: it's its map's)
-        return found;
+                found(new(0, bias + i - 4, 'Z', code)); // (a zlib-compressed 'A' entry has the same shape: it's its map's)
+        return undecoded;
     }
 
     static readonly int[] HashSizes = [20, 8];
@@ -77,7 +87,7 @@ public static class InlineShaders
     static List<(int Off, char Fmt)>? Chain(byte[] d, int e, int k)
     {
         var fmt = e + 8 <= d.Length && I64(d, e) == 12 ? 'B' : 'A';
-        var list = new List<(int, char)>(Math.Min(k, 1024));
+        var list = new List<(int, char)>(); // most anchors are false: no array until an entry holds
         for (var i = 0; i < k; i++)
         {
             var len = Layout(d, e, fmt).Len;
@@ -136,11 +146,11 @@ public static class InlineShaders
         using var z = new ZLibStream(new MemoryStream(d, at, n), CompressionMode.Decompress);
         using var o = new MemoryStream();
         var limit = Math.Min(MaxCode, (long)MaxRatio * n);
-        var buf = new byte[81920];
+        Span<byte> buf = stackalloc byte[16 << 10]; // every candidate stream gets here: no heap buffer per call
         for (int got; (got = z.Read(buf)) > 0;)
         {
             if (o.Length + got > limit) throw new InvalidDataException("inflates past the code bound");
-            o.Write(buf, 0, got);
+            o.Write(buf[..got]);
         }
         return o.ToArray();
     }

@@ -28,12 +28,14 @@
 #include <d3d12shader.h>
 #include <dxgi1_4.h>
 #include <tlhelp32.h>
+#include <winternl.h>
 #include <bcrypt.h>
 #include <dxcapi.h>
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>  // third_party/vulkan: Khronos Vulkan-Headers vulkan-sdk-1.4.341.0 (Apache-2.0)
 #include "vk_spirv.h"
 #include "probe_util.h"
+#include "ledger_key.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -3067,6 +3069,19 @@ static HRESULT STDMETHODCALLTYPE ov_present1(IDXGISwapChain1* sc, UINT sync, UIN
     return ((HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*))g_ov_present1)(sc, sync, flags, p);
 }
 
+// scskiller_frames.bin's frames after its last launch record; -1: no file.
+static long frames_in(const std::wstring& dir) {
+    FILE* fr = _wfopen((dir + L"scskiller_frames.bin").c_str(), L"rb");
+    long frames = -1;
+    for (uint32_t r; fr && fread(&r, 4, 1, fr) == 1;) {
+        uint64_t head[4];
+        if (r == 0xFFFFFFFF) frames = fread(head, sizeof head, 1, fr) == 1 ? 0 : -1;
+        else if (r >> 28 != 15) ++frames;
+    }
+    if (fr) fclose(fr);
+    return frames;
+}
+
 static int frames_rows(const std::wstring& dir, int n) {
     SetEnvironmentVariableW(L"SCSKILLER_MODE", L"record");
     HMODULE m = LoadLibraryW((dir + L"d3d12.dll").c_str());
@@ -3132,15 +3147,63 @@ static int frames_rows(const std::wstring& dir, int n) {
     std::thread(pso, 2).join();
     Sleep(2500);  // the proxy writes the frames once a second
     printf("overlay %d\nlate %d\n", g_overlay.load(), g_late.load());
-    FILE* fr = _wfopen((dir + L"scskiller_frames.bin").c_str(), L"rb");
-    long frames = -1;
-    for (uint32_t r; fr && fread(&r, 4, 1, fr) == 1;) {
-        uint64_t head[4];
-        if (r == 0xFFFFFFFF) frames = fread(head, sizeof head, 1, fr) == 1 ? 0 : -1;
-        else if (r >> 28 != 15) ++frames;
+    printf("frames %ld\n", frames_in(dir));
+    return 0;
+}
+
+// `selftest framesfg plain|<queue name>`: a swap chain made and presented 3 times with each of Present and Present1.
+// With a queue name, a swap chain on an unnamed queue is made and presented 3 times first, then the swap chain on a
+// queue of that name (FSR 3's frame generation: "AMD FSR PresentQueue"). Prints "hooked <0|1>" (named: the first swap
+// chain's Present is the proxy's), "after <0|1>" (the same for the last swap chain) and "frames <n>". overlay: an overlay
+// hooks Present (slot 8) after the proxy, before the named queue's swap chain; then "slot8 overlay <0|1>" and
+// "slot22 ours <0|1>" for that swap chain's vtable instead of "after".
+static int frames_fg_rows(const std::wstring& dir, const wchar_t* queue, bool overlay) {
+    SetEnvironmentVariableW(L"SCSKILLER_MODE", L"record");
+    HMODULE m = LoadLibraryW((dir + L"d3d12.dll").c_str());
+    auto proxy_create = m ? (decltype(&D3D12CreateDevice))GetProcAddress(m, "D3D12CreateDevice") : nullptr;
+    IDXGIFactory4* f = nullptr;
+    IDXGIAdapter* warp = nullptr;
+    ID3D12Device* dev = nullptr;
+    CHECK(proxy_create && SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&f))) && SUCCEEDED(f->EnumWarpAdapter(IID_PPV_ARGS(&warp))) &&
+          SUCCEEDED(proxy_create(warp, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))));
+    auto chain = [&](IDXGISwapChain1** sc, const wchar_t* name) {
+        HWND wnd = CreateWindowExW(0, L"STATIC", L"scskiller framesfg", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64, nullptr, nullptr, nullptr, nullptr);
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        ID3D12CommandQueue* q = nullptr;
+        DXGI_SWAP_CHAIN_DESC1 d = {64, 64, DXGI_FORMAT_R8G8B8A8_UNORM, FALSE, {1, 0}, DXGI_USAGE_RENDER_TARGET_OUTPUT, 2};
+        d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        return wnd && SUCCEEDED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) && (!name || SUCCEEDED(q->SetName(name))) &&
+               SUCCEEDED(f->CreateSwapChainForHwnd(q, wnd, &d, nullptr, nullptr, sc));
+    };
+    auto ours = [&](IDXGISwapChain1* sc) {
+        HMODULE owner = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(*(void***)sc)[8], &owner);
+        return owner == m;
+    };
+    IDXGISwapChain1* sc = nullptr;
+    DXGI_PRESENT_PARAMETERS p = {};
+    CHECK(chain(&sc, nullptr));
+    if (queue) {
+        printf("hooked %d\n", ours(sc));
+        for (int i = 0; i < 3; ++i) sc->Present(0, 0);
+        void** vt = *(void***)sc;
+        DWORD old;
+        if (overlay) {
+            CHECK(VirtualProtect(&vt[8], sizeof(void*), PAGE_READWRITE, &old));
+            g_late_present = vt[8], vt[8] = (void*)late_present;
+            VirtualProtect(&vt[8], sizeof(void*), old, &old);
+        }
+        CHECK(chain(&sc, queue));
+        if (overlay) {
+            HMODULE owner = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(*(void***)sc)[22], &owner);
+            printf("slot8 overlay %d\nslot22 ours %d\n", (*(void***)sc)[8] == (void*)late_present, owner == m);
+        }
     }
-    if (fr) fclose(fr);
-    printf("frames %ld\n", frames);
+    if (!overlay) printf("after %d\n", ours(sc));
+    for (int i = 0; i < 3; ++i) sc->Present(0, 0), sc->Present1(0, 0, &p);
+    Sleep(2500);  // the proxy writes the frames once a second
+    printf("frames %ld\n", frames_in(dir));
     return 0;
 }
 
@@ -3197,16 +3260,45 @@ static HRESULT compute_pso(ID3D12Device* dev, ID3D12RootSignature* rs, int k) {
     return dev->CreateComputePipelineState(&c, IID_PPV_ARGS(&p));
 }
 
-// `selftest anticheat <client dll | ->`: a compute PSO on a device made through the proxy d3d12.dll next to the exe (WARP),
-// then the client dll is loaded (an anti-cheat client's module name; "-": none) and a second PSO. Prints
+// LdrRegisterDllNotification's (ntdll) data for a load
+struct LdrLoaded { ULONG flags; PCUNICODE_STRING full, base; PVOID dll_base; ULONG size; };
+static std::wstring g_spoof_dir, g_spoof_to;
+// REFramework's (kananlib's spoof_module_paths_in_exe_dir): a dll loaded from the exe's folder gets its loader entry's
+// FullDllName rewritten to <folder>\_storage_\<name>, a copy, before its DllMain runs.
+static void CALLBACK spoof_path(ULONG reason, const LdrLoaded* d, PVOID) {
+    std::wstring full(d->full->Buffer, d->full->Length / sizeof(wchar_t));
+    if (reason != 1 || _wcsicmp(full.c_str(), (g_spoof_dir + L"d3d12.dll").c_str())) return;
+    LIST_ENTRY* head = &NtCurrentTeb()->ProcessEnvironmentBlock->Ldr->InMemoryOrderModuleList;
+    for (LIST_ENTRY* e = head->Flink; e != head; e = e->Flink)
+        if (auto t = CONTAINING_RECORD(e, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks); t->DllBase == d->dll_base)
+            t->FullDllName.Buffer = g_spoof_to.data(), t->FullDllName.Length = t->FullDllName.MaximumLength = USHORT(g_spoof_to.size() * sizeof(wchar_t));
+}
+
+// `selftest anticheat <client dll | -> [folder | spoof]`: a compute PSO on a device made through the proxy d3d12.dll next to
+// the exe (WARP), then the client dll is loaded (an anti-cheat client's module name; "-": none) and a second PSO. Prints
 // "created 0x<hr> 0x<hr>". The proxy decided admission at the device: a client loaded after it doesn't change the run.
-// "+<client dll>": the client is loaded before the device instead.
-static int anticheat_rows(const std::wstring& dir, const wchar_t* client) {
+// "+<client dll>": the client is loaded before the device instead. folder: the proxy is loaded from that folder of the
+// exe's (a mod's copy elsewhere). spoof: the proxy next to the exe has its loader path rewritten the way REFramework does
+// (spoof_path); prints "path <the path GetModuleFileNameW reports>".
+static int anticheat_rows(const std::wstring& dir, const wchar_t* client, const std::wstring& from = L"") {
     SetEnvironmentVariableW(L"SCSKILLER_MODE", L"record");
-    const bool early = *client == L'+';
+    const bool early = *client == L'+', spoof = from == L"spoof\\";
     if (early) CHECK(LoadLibraryW(client + 1));
-    HMODULE m = LoadLibraryW((dir + L"d3d12.dll").c_str());
+    if (spoof) {
+        g_spoof_dir = dir, g_spoof_to = dir + L"_storage_\\d3d12.dll";
+        CreateDirectoryW((dir + L"_storage_").c_str(), nullptr);
+        CHECK(CopyFileW((dir + L"d3d12.dll").c_str(), g_spoof_to.c_str(), FALSE));
+        auto reg = (NTSTATUS(NTAPI*)(ULONG, decltype(&spoof_path), PVOID, PVOID*))GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "LdrRegisterDllNotification");
+        PVOID cookie;
+        CHECK(reg && reg(0, spoof_path, nullptr, &cookie) >= 0);
+    }
+    HMODULE m = LoadLibraryW((dir + (spoof ? L"" : from) + L"d3d12.dll").c_str());
     CHECK(m);
+    if (spoof) {
+        wchar_t p[MAX_PATH];
+        GetModuleFileNameW(m, p, MAX_PATH);
+        printf("path %ls\n", p);
+    }
     auto create = (decltype(&D3D12CreateDevice))GetProcAddress(m, "D3D12CreateDevice");
     auto ser = (decltype(&D3D12SerializeRootSignature))GetProcAddress(m, "D3D12SerializeRootSignature");
     IDXGIFactory4* f = nullptr;
@@ -3323,9 +3415,9 @@ static int unload_rows(const std::wstring& dir) {
 
 // The app's attestation for this exe, as ScsKiller.WriteAttestation writes it: scskiller.armed here (its nonce kept when it
 // has one, so copies of this exe running from the same folder share it) and the ledger entry
-// %LOCALAPPDATA%\SCSKiller\armed\<SHA-1 of the exe's path, UTF-16LE, A-Z lowered>, removed when this process exits.
+// %LOCALAPPDATA%\SCSKiller\armed\<the first of ledger_keys>, removed when this process exits.
 static std::wstring g_ledger;
-static void arm_self(const std::wstring& dir, std::wstring exe) {
+static void arm_self(const std::wstring& dir, const std::wstring& exe) {
     WIN32_FILE_ATTRIBUTE_DATA self;
     if (!GetFileAttributesExW(exe.c_str(), GetFileExInfoStandard, &self)) return;
     const std::wstring armed = dir + L"scskiller.armed";
@@ -3340,19 +3432,15 @@ static void arm_self(const std::wstring& dir, std::wstring exe) {
     WritePrivateProfileStringW(L"scskiller", L"nonce", nonce, armed.c_str());
     WritePrivateProfileStringW(L"scskiller", L"exe_size", std::to_wstring((uint64_t)self.nFileSizeHigh << 32 | self.nFileSizeLow).c_str(), armed.c_str());
     WritePrivateProfileStringW(L"scskiller", L"exe_time", std::to_wstring((uint64_t)self.ftLastWriteTime.dwHighDateTime << 32 | self.ftLastWriteTime.dwLowDateTime).c_str(), armed.c_str());
-    for (auto& c : exe)
-        if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
-    uint8_t h[20];
+    const std::wstring key = ledger_keys(exe).front();   // the one the proxy reads
     PWSTR local = nullptr;
-    if (BCryptHash(BCRYPT_SHA1_ALG_HANDLE, nullptr, 0, (PUCHAR)exe.data(), (ULONG)(exe.size() * sizeof(wchar_t)), h, 20) || FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)))
+    if (key.empty() || FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)))
         return CoTaskMemFree(local);
     std::wstring ledger = std::wstring(local) + L"\\SCSKiller";
     CoTaskMemFree(local);
     CreateDirectoryW(ledger.c_str(), nullptr);
     CreateDirectoryW((ledger += L"\\armed").c_str(), nullptr);
-    wchar_t hex[41] = {};
-    for (int i = 0; i < 20; ++i) swprintf(hex + 2 * i, 3, L"%02x", h[i]);
-    g_ledger = ledger + L"\\" + hex;
+    g_ledger = ledger + L"\\" + key;
     WritePrivateProfileStringW(L"scskiller", L"nonce", nonce, g_ledger.c_str());
     atexit([] { DeleteFileW(g_ledger.c_str()); });
 }
@@ -3369,8 +3457,9 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 2 && !wcscmp(argv[1], L"frames")) return frames_rows(dir, _wtoi(argv[2]));
     if (argc > 1 && !wcscmp(argv[1], L"unload")) return unload_rows(dir);
     if (argc > 1 && !wcscmp(argv[1], L"framesheld")) return frames_held(dir);
+    if (argc > 2 && !wcscmp(argv[1], L"framesfg")) return frames_fg_rows(dir, wcscmp(argv[2], L"plain") ? argv[2] : nullptr, argc > 3 && !wcscmp(argv[3], L"overlay"));
     if (argc > 1 && !wcscmp(argv[1], L"factory")) return factory_rows(dir, argc > 2 ? argv[2] : nullptr);
-    if (argc > 2 && !wcscmp(argv[1], L"anticheat")) return anticheat_rows(dir, argv[2]);
+    if (argc > 2 && !wcscmp(argv[1], L"anticheat")) return anticheat_rows(dir, argv[2], argc > 3 ? argv[3] + std::wstring(L"\\") : L"");
     if (argc > 1 && !wcscmp(argv[1], L"factoryrejected")) return factory_rejected_rows(dir);
     if (argc > 2 && !wcscmp(argv[1], L"chain")) return chain_rows(dir, (unsigned)_wtoi(argv[2]), argc > 3 && !wcscmp(argv[3], L"swap"));
     if (argc > 2 && !wcscmp(argv[1], L"layer")) return layer_rows(dir, (unsigned)_wtoi(argv[2]), argc > 3 && !wcscmp(argv[3], L"old"));

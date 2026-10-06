@@ -83,6 +83,49 @@ public class GameCachesTests : IDisposable
         Assert.Empty(D3DSCache.FoldersOf(Path.Combine(_root, "missing"), g));
     }
 
+    /// <summary>A folder whose db names another exe is decided without its WAL (one held exclusively would make it a doubt);
+    /// the db's paths are kept until the db changes.</summary>
+    [Fact]
+    public void A_folder_another_exe_owns_is_decided_from_its_db_without_reading_the_WAL()
+    {
+        var g = Steam(@"C:\Games\Steam\steamapps\common\Fake Game");
+        var other = FakeD3DSCache.Folder(Path.Combine(_root, "D3DSCache"), "01", @"C:\Other\other.exe");
+        var db = Path.Combine(other, "F4EB2D6C-ED2B-4BDD-AD9D-F913287E6768.dxcache");
+        using (new FileStream(db + "-wal", FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.False(D3DSCache.IsGames(other, g));
+            using (new FileStream(db, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                Assert.False(D3DSCache.IsGames(other, g));   // its paths kept: the db isn't read again
+        }
+
+        File.Delete(db);   // the db rewritten for the game: read again
+        FakeD3DSCache.Db(db, g.ExePath);
+        File.SetLastWriteTimeUtc(db, DateTime.UtcNow.AddMinutes(1));
+        Assert.True(D3DSCache.IsGames(other, g));
+        using (new FileStream(db + "-wal", FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Assert.Null(D3DSCache.IsGames(other, g));   // the game's: its WAL is read, and can't be: a doubt
+    }
+
+    /// <summary>A test deletes the folders its own exes left since it started, nothing else.</summary>
+    [Fact]
+    public void A_test_deletes_only_the_D3DSCache_folders_of_its_own_exes()
+    {
+        var (d3ds, mine) = (Path.Combine(_root, "D3DSCache"), Path.Combine(_root, "scskiller-app-test-1"));
+        var started = DateTime.UtcNow;
+        var selftest = FakeD3DSCache.Folder(d3ds, "01", Path.Combine(mine, "admit", "selftest.exe"));
+        var staged = FakeD3DSCache.Folder(d3ds, "02", Path.Combine(mine, "data", "work", "stage-1-1", "scsk-cp-1.exe").ToUpperInvariant());
+        FakeD3DSCache.Folder(d3ds, "03", Path.Combine(_root, "scskiller-app-test-10", "selftest.exe"));   // another test's
+        FakeD3DSCache.Folder(d3ds, "04", @"C:\Games\Fake\Fake.exe");                                     // a game
+        FakeD3DSCache.Folder(d3ds, "05", Path.Combine(mine, "b.exe"), broken: true);                     // in doubt
+        var mixed = FakeD3DSCache.Folder(d3ds, "06", Path.Combine(mine, "c.exe"));
+        FakeD3DSCache.Db(Path.Combine(mixed, "other.dxcache"), @"C:\Games\Fake\Fake.exe");
+        var older = FakeD3DSCache.Folder(d3ds, "07", Path.Combine(mine, "d.exe"));
+        Directory.SetCreationTimeUtc(older, started.AddMinutes(-5));                                     // before this test
+
+        Assert.Equal([selftest, staged], TestD3DSCache.Made(d3ds, mine, started).Order());
+        Assert.Empty(TestD3DSCache.Made(Path.Combine(_root, "missing"), mine, started));
+    }
+
     [Fact]
     public void A_path_only_in_the_WAL_is_found_with_non_ascii_characters()
     {

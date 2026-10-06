@@ -23,6 +23,7 @@ public sealed class GameRecord
     public string? WarmedPlanItems { get; set; }             // PlanItems of the plan the last complete warm replayed
     public string? PlanKeysFile { get; set; }                // the plan's planner-made pipelines (KeyFiles), in the game's folder; null = not kept
     public string? WarmKeysFile { get; set; }                // what the last complete warm replayed (KeyFiles); null = a warm from before they were kept
+    public PendingCount? Pending { get; set; }               // the last count of pipelines new since the warm (ScsKiller.PendingOf)
     public bool PlanPerStage { get; set; }                  // the plan has each stage unit once, not every pairing (per-stage cache, not Maximum)
     public bool WarmedPerStage { get; set; }                // PlanPerStage of the plan the last complete warm replayed
     public string? PlanMiddleware { get; set; }             // MiddlewarePacks.Fingerprint when the plan was built (DLL versions + pack sizes)
@@ -91,6 +92,11 @@ public sealed class GameRecord
     public bool RtUnseen { get; set; }                       // a recorded launch of ScsKiller.EnoughRecording built no ray tracing state object, and none since did
 }
 
+/// <summary>The exe discovery took for a game whose source named <paramref name="Named"/>, its Unreal Shipping exe or the named
+/// one (<see cref="Games.GameFiles.GameExe"/>), while the source names the same exe and <paramref name="Stamp"/> (the store's
+/// build and the install root's entries) is unchanged.</summary>
+public sealed record ShippingPick(string Named, string? Stamp, string Exe);
+
 /// <summary>A run of the game as the app's watcher saw it: not running at <paramref name="From"/>, last seen running at
 /// <paramref name="To"/> (both within a poll of the real start and exit).</summary>
 public sealed record PlayWindow(DateTimeOffset From, DateTimeOffset To);
@@ -112,9 +118,15 @@ public sealed record ChainedDll(string Name, string Sha256);
 public sealed record OfflineSession(string GameId, string Exe, string InstallDir, string[] Original, string[] Created, int Pid = 0, long Started = 0,
     bool Resumed = false);
 
+public sealed record KeptList(string Build, string? Driver, List<GameState> Games);
+
+/// <summary>Pipelines new since the last complete warm, as counted from the files and keys <paramref name="Key"/> stamps.</summary>
+public sealed record PendingCount(string Key, long Recorded, long? Planned, bool Unknown);
+
 /// <summary>The expensive part of a scan (engine detection, planner check, anti-cheat), reused while <see cref="Key"/>
-/// (exe stamp, store version, vendor profile, recording, SCSKiller build) is unchanged.</summary>
-public sealed record Evaluation(string Key, EngineInfo? Engine, AntiCheat AntiCheat, PlanCheck Check);
+/// (exe stamp, store version, vendor profile, recording, SCSKiller build) is unchanged. <paramref name="Clean"/>: the
+/// <see cref="ScsKiller.FolderStamp"/> at the last full anti-cheat check that found none.</summary>
+public sealed record Evaluation(string Key, EngineInfo? Engine, AntiCheat AntiCheat, PlanCheck Check, string? Clean = null);
 
 /// <summary>%LOCALAPPDATA%\SCSKiller: settings.json, scan.json, dismissed.json + games\&lt;id&gt;\state.json.</summary>
 public sealed class AppStore(string dataDir)
@@ -134,6 +146,24 @@ public sealed class AppStore(string dataDir)
 
     public Dictionary<string, Evaluation> LoadScan() => Load<Dictionary<string, Evaluation>>(Path.Combine(DataDir, "scan.json")) ?? [];
     public void SaveScan(Dictionary<string, Evaluation> scan) => Save(Path.Combine(DataDir, "scan.json"), scan);
+
+    /// <summary>The games the last scan's sources listed, by the SCSKiller <paramref name="build"/> that listed them: their exes
+    /// are reused while a game's build is the same; another SCSKiller build's (its exe heuristics may differ) none.</summary>
+    public List<Game> LoadDiscovered(string build) =>
+        Load<Discovered>(Path.Combine(DataDir, "discovered.json")) is { } d && d.Build == build ? d.Games : [];
+    public void SaveDiscovered(string build, List<Game> games, Dictionary<string, ShippingPick>? shipping = null) =>
+        Save(Path.Combine(DataDir, "discovered.json"), new Discovered(build, games, shipping));
+
+    /// <summary>The Shipping exes the last discovery found, by game id.</summary>
+    public Dictionary<string, ShippingPick> LoadShippingPicks(string build) =>
+        Load<Discovered>(Path.Combine(DataDir, "discovered.json")) is { Shipping: { } p } d && d.Build == build ? p : [];
+
+    sealed record Discovered(string Build, List<Game> Games, Dictionary<string, ShippingPick>? Shipping = null);
+
+    /// <summary>The games as the last scan or refresh listed them, by the SCSKiller build and GPU driver that did: what a
+    /// start with Settings.ScanAtStart off shows.</summary>
+    public KeptList? LoadList() => Load<KeptList>(Path.Combine(DataDir, "games.json"));
+    public void SaveList(KeptList list) => Save(Path.Combine(DataDir, "games.json"), list);
 
     /// <summary>Entry by entry: one that doesn't parse (null, another shape) is left out, the others kept.</summary>
     public List<Games.ManualEntry> LoadManualGames() => (Load<List<JsonElement>>(Path.Combine(DataDir, "manual-games.json")) ?? [])

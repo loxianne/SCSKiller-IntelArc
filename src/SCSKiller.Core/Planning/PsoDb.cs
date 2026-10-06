@@ -404,6 +404,17 @@ public static partial class PsoDb
         catch (InvalidDataException) { return r.Key; }
     }
 
+    /// <summary>A state object record that names an export with a launch's alias (<see cref="StateObjectIdentity"/>): a
+    /// later launch of the game creates it under another name.</summary>
+    public static bool HasLaunchAlias(Rec r)
+    {
+        if (!IsStateObject(r.Tag)) return false;
+        var found = false;
+        try { WalkStateObject(r, (name, renames) => found |= renames != null && LaunchSuffix().IsMatch(name), null); }
+        catch (InvalidDataException) { return false; }
+        return found;
+    }
+
     /// <summary>A state object record's subobjects past its base key: <paramref name="export"/> gets each export's name and
     /// the function it renames (and each hit group's name, renaming none); <paramref name="write"/> gets the bytes in order,
     /// a string that names an export or hit group (an export's own name, a hit group's name and the exports it imports, an

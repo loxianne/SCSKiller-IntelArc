@@ -23,6 +23,14 @@
                             <Button Content="Check for updates" Click="OnCheckForUpdates" IsEnabled="{x:Bind Vm.CanCheck, Mode=OneWay}" />
                             <TextBlock Text="{x:Bind Vm.UpdateNote, Mode=OneWay}" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap" />
                         </StackPanel>
+                        <CheckBox IsChecked="{x:Bind Vm.InstallUpdatesAutomatically, Mode=TwoWay}" Visibility="{x:Bind Vm.ShowsCheck}"
+                                  AutomationProperties.Name="Install updates automatically">
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Install updates automatically" TextWrapping="Wrap" />
+                                <TextBlock Text="A downloaded update installs the next time SCSKiller starts or quits, never during a compile, an offline session or a game. Off: only Restart to update installs it."
+                                           Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </CheckBox>
                         <InfoBar IsOpen="{x:Bind Vm.HasUpdateProblem, Mode=OneWay}" Visibility="{x:Bind Vm.HasUpdateProblem, Mode=OneWay}"
                                  Message="{x:Bind Vm.UpdateProblem, Mode=OneWay}" Severity="Warning" IsClosable="False" />
                         <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0" Visibility="{x:Bind Vm.ShowsSource}">

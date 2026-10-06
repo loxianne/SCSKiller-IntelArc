@@ -116,7 +116,9 @@ public sealed class RouteFailover : DelegatingHandler
                     response.Dispose();
                     continue;
                 }
-                lock (gate) if (at != current) (current, stickyUntil) = (at, clock.GetUtcNow() + Sticky);
+                // only a request that failed over moves the routes, and only from where it started: one that began on the
+                // fallback before a probe put the primary back must not undo the probe's verdict
+                lock (gate) if (at != first && current == first) (current, stickyUntil) = (at, clock.GetUtcNow() + Sticky);
                 return response;
             }
             catch (HttpRequestException e) when (!ct.IsCancellationRequested)

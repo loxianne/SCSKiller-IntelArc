@@ -18,6 +18,8 @@ static const GUID kUnwrapped = {0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0
 
 extern "C" __declspec(dllexport) LONG WINAPI FakeNext_Calls() { return g_calls; }
 extern "C" __declspec(dllexport) void WINAPI FakeNext_SwapPs(const void* p, SIZE_T n) { g_ps.assign((const char*)p, n); }
+// Copied as a game's D3D12\D3D12Core.dll: an Agility runtime newer than any system's that makes no device (WarmerTests)
+extern "C" __declspec(dllexport) const UINT D3D12SDKVersion = 100000;
 
 // The wrapper: every slot forwards to the same slot of the wrapped device (a thunk swaps `this`), but QueryInterface and
 // CreateGraphicsPipelineState. 128 slots cover ID3D12Device14.

@@ -273,7 +273,8 @@ public sealed class GameRow(GameState s, bool queued = false, bool compiling = f
     public string FullNote => s.Status switch
     {
         GameStatus.Warmed when Partly => $"driver {s.WarmedDriverVersion} · {s.Careful!.LaunchCompiled * 100:0}% still compiled at its first launch",
-        GameStatus.Warmed => $"driver {s.WarmedDriverVersion}" + (ScsKiller.IsPartial(s.Plan) ? " · a recording compiles the rest" : ""),
+        GameStatus.Warmed => $"driver {s.WarmedDriverVersion}" + (ScsKiller.IsPartial(s.Plan) ? " · a recording compiles the rest"
+            : ScsKiller.RtAfterRecording(s) ? " · " + ScsKiller.RtAfterRecordingNote : ""),
         GameStatus.NeedsRecording when s.AntiCheat != AntiCheat.None => $"{Fmt.AntiCheatName(s.AntiCheat)} blocks recording",
         GameStatus.NeedsRecording when s.RecordingPaused => ScsKiller.PausedNote(App.Core.Settings),
         GameStatus.NeedsRecording when s.RecorderInstalled && !ScsKiller.RecordedEnough(s) => "recorder on: play for about 5 minutes",
@@ -557,6 +558,8 @@ public sealed class DetailVm(string id) : Bindable
     bool Partial => ScsKiller.IsPartial(s.Plan);
     /// <summary>Needs a recording for its ray tracing only: the rest compiles (a partial compile, offered but not the primary action).</summary>
     bool RtPartial => s.Status == GameStatus.NeedsRecording && ScsKiller.NeedsRtRecording(s);
+    /// <summary>Compiled, and a recording would add its ray tracing: the record tip, not the warning callout.</summary>
+    bool RtAfter => ScsKiller.RtAfterRecording(s);
     public bool NoAntiCheat => s.AntiCheat == AntiCheat.None;
     /// <summary>The recorder may go next to the game: no anti-cheat, and not a game added by hand whose folder isn't confirmed.</summary>
     bool CanRecord => NoAntiCheat && !s.RootUnconfirmed;
@@ -573,7 +576,8 @@ public sealed class DetailVm(string id) : Bindable
     public string StatusReason => Sentence(s.Status switch
     {
         GameStatus.Warmed when ScsKiller.IsPartlyWarmed(s) => s.StatusReason,
-        GameStatus.Warmed => $"compiled for driver {s.WarmedDriverVersion}" + (s.WarmedAt is { } t ? $" on {t.LocalDateTime:d}" : ""),
+        GameStatus.Warmed => $"compiled for driver {s.WarmedDriverVersion}" + (s.WarmedAt is { } t ? $" on {t.LocalDateTime:d}" : "")
+            + (RtAfter ? ". " + Sentence(ScsKiller.RtAfterRecordingNote) : ""),
         // a cache here: played since a clear or a stopped compile; then the planner's note when the row has one to say
         GameStatus.Ready => (s.CacheOnDisk > 0 ? $"not fully compiled yet: {Format.Bytes(s.CacheOnDisk)} of it is in the driver cache"
             : s.LastWarmTime == null ? "not compiled yet" : "its shader cache is empty: compile it again")
@@ -585,7 +589,7 @@ public sealed class DetailVm(string id) : Bindable
     // The manifest is public: a PC without "db" sees that the community database covers the game, and where to get it.
     // Shown, it is the page's only mention of the database.
     public bool HasDbTeaser => s is { InCommunityDb: true, Community: null } && !App.Account.HasDb
-        && (s.Status == GameStatus.NeedsRecording || s.Status == GameStatus.Unsupported && !NoAntiCheat && s.StatusReason.StartsWith("needs a recording, which", StringComparison.Ordinal));
+        && (s.Status == GameStatus.NeedsRecording || RtAfter || s.Status == GameStatus.Unsupported && !NoAntiCheat && s.StatusReason.StartsWith("needs a recording, which", StringComparison.Ordinal));
     public string DbTeaser => $"In the community database: {s.CommunityDbPsos:N0} pipeline{(s.CommunityDbPsos == 1 ? "" : "s")} recorded by other players. Patreon supporters compile them without recording.";
     public string DbTeaserLink => App.Account.SignedIn ? "Patreon membership" : "Sign in with Patreon";
     public bool CanCompile => s.Status is GameStatus.Ready or GameStatus.Warmed or GameStatus.Stale || RtPartial;
@@ -657,11 +661,11 @@ public sealed class DetailVm(string id) : Bindable
 
     // The one tip left: a game that can't compile before a recording, or not its ray tracing (a plan's other gaps are the
     // coverage card's "what's left").
-    public bool HasRecordTip => CanRecord && s.Status == GameStatus.NeedsRecording && !RecordOn;
+    public bool HasRecordTip => CanRecord && (s.Status == GameStatus.NeedsRecording || RtAfter) && !RecordOn;
     bool Enough => ScsKiller.RecordedEnough(s);
     public string RecordTipTitle => Enough ? "Record more play" : "Record 5 minutes of play";
-    public string RecordTip => RtPartial ? $"Turn on recording and play with ray tracing on{(Enough ? "" : " for about 5 minutes")}. " + ScsKiller.RtWhy(App.Core.Vendor.Caps, s.Engine)
-            + " Everything else compiles from the game files already."
+    public string RecordTip => RtPartial || RtAfter ? $"Turn on recording and play with ray tracing on{(Enough ? "" : " for about 5 minutes")}. " + ScsKiller.RtWhy(App.Core.Vendor.Caps, s.Engine)
+            + (RtAfter ? " Everything else is compiled." : " Everything else compiles from the game files already.")
         : Enough ? Sentence(s.StatusReason) + "."
         : "Turn on recording and play as usual for about 5 minutes. SCSKiller learns this game's shader layout from it, then it can compile.";
     public bool ShowRecordAction => !RecordOn && CanToggleRecord;
@@ -684,7 +688,7 @@ public sealed class DetailVm(string id) : Bindable
     bool Rt => ScsKiller.NeedsRtRecording(s);
     bool RtUnseen => s.RtUnseen;
     bool RtInline => ScsKiller.RtInlineCovers(P);
-    bool Compiled => s.WarmedAt != null && s.Status != GameStatus.Stale;   // Warmed, or compiled without its ray tracing (NeedsRecording)
+    bool Compiled => s.WarmedAt != null && s.Status != GameStatus.Stale;
 
     /// <summary>Where the plan's pipelines come from, in a player's words; the recording's row carries the community note,
     /// and without one the community database's status is its own row. Ray tracing: covered or what it needs.</summary>
@@ -701,7 +705,7 @@ public sealed class DetailVm(string id) : Bindable
         p.MiddlewareItems > 0 ? new(p.MiddlewareSharedItems == 0 ? "Its upscalers, learned from recordings"
             : p.MiddlewareSharedItems == p.MiddlewareItems ? "Its upscalers, from shared packs" : "Its upscalers, from recordings and shared packs", Fmt.N(p.MiddlewareItems)) : null,
         p.D3D11Shaders > 0 ? new("DirectX 11 shaders", Fmt.N(p.D3D11Shaders)) : null,
-        p.RtLibraries > 0 ? new("Ray-traced effects", s.Engine?.NoRtPipelines == true ? "inline, from the game files" : p.RtUncovered == 0 ? "covered" : s.RtToPlan ? "being checked" : RtUnseen ? "not seen while recording" : RtInline ? "inline ones covered" : !Rt ? "mostly covered" : CanRecord ? "need a recording" : "not compiled") : null,
+        p.RtLibraries > 0 ? new("Ray-traced effects", s.Engine?.NoRayTracing == true ? "off in this game" : s.Engine?.NoRtPipelines == true ? "inline, from the game files" : p.RtUncovered == 0 ? "covered" : s.RtToPlan ? "being checked" : RtUnseen ? "not seen while recording" : RtInline ? "inline ones covered" : !Rt ? "mostly covered" : CanRecord ? "need a recording" : "not compiled") : null,
     }.OfType<DetailRow>().ToList();
     public bool HasSources => Sources.Count > 0;
     /// <summary>The community database's line under the recording row; null = nothing to say.</summary>
@@ -821,14 +825,12 @@ public sealed class DetailVm(string id) : Bindable
     public string CompileText => s.WarmedAt is { } at
         ? $"Compiled {Fmt.When(at)}" + (s.LastWarmTime is { } t ? $" in {Format.Duration(t)}" : "") + $", for driver {s.WarmedDriverVersion}."
           + (s.LastWarmFailed != null && Failed == 0 && Skipped == 0 && Crashed == 0 ? " Nothing failed." : "")   // null = not known (a warm from before these were kept): no claim
+          + (Failed > 0 ? $" The driver skipped {Failed:N0} combination{(Failed == 1 ? "" : "s")}." : "")
           + (s.CacheOnDisk is { } c ? $" It uses {Format.Bytes(c)} of disk space." : "")
         : s.LastWarmTime is { } last ? $"Its shader cache was cleared. The last compile took {Format.Duration(last)}."
         : (s.EstimatedWarmTime is { } est ? $"It takes about {Format.Duration(est)} and runs in the background, so you can keep using the PC." : "It runs in the background, so you can keep using the PC.")
           + (s.EstimatedCacheBytes is { } b ? $" It adds about {Format.Bytes(b)} to the driver's shader cache." : "");
-    public string FailedTitle => $"{Failed:N0} couldn't be compiled";
     public string SkippedTitle => $"{Skipped + Crashed:N0} skipped";
-    public string? FailedText => s.WarmedAt != null && Failed > 0
-        ? $"The driver rejected {Failed:N0} pipeline{(Failed == 1 ? "" : "s")}. If the game uses {(Failed == 1 ? "it" : "them")}, it compiles {(Failed == 1 ? "it" : "them")} itself; nothing to do." : null;
     long NeedsRecording => Math.Min(Skipped, s.LastWarmNeedsRecording ?? 0);   // of Skipped: flagged by the community recording
     long NotInGame => Skipped - NeedsRecording;
     public string? SkippedText => s.WarmedAt == null || Skipped + Crashed == 0 ? null
@@ -838,7 +840,6 @@ public sealed class DetailVm(string id) : Bindable
             Crashed > 0 ? $"{Crashed:N0} {(Crashed == 1 ? "was" : "were")} skipped: {(Crashed == 1 ? "it crashes" : "they crash")} the GPU driver. If the game uses {(Crashed == 1 ? "it" : "them")}, it compiles {(Crashed == 1 ? "it" : "them")} itself." : null,
             NeedsRecording > 0 ? $"{NeedsRecording:N0} need{(NeedsRecording == 1 ? "s" : "")} a recording on this PC: the game or a mod builds {(NeedsRecording == 1 ? "its shaders" : "their shaders")} while it runs, so they're in no game file. Play with \"Record while I play\" on to catch them." : null,
         }.OfType<string>());
-    public bool HasFailed => FailedText != null;
     public bool HasSkipped => SkippedText != null;
 
     // Last play session (SessionStats, no timestamp): one bar, three segments, under the Record switch. Ready = from the
@@ -880,7 +881,10 @@ public sealed class DetailVm(string id) : Bindable
     public string FramesSummary => F is not { } f ? ""
         : $"Startup (the game's own shader precompile and first load): {Format.Duration(f.Startup)}. In play: {InPlay(f).Count(h => h.Ms >= 50):N0} frames of 50 ms or more, "
           + $"{InPlay(f).Count(h => h.Ms >= 100):N0} of 100 ms or more. Frame times stay on this PC.";
-    public IReadOnlyList<DetailRow> HitchRows => F?.Hitches.Select(h => new DetailRow($"{Clock(h.At)}  {Cause(h.Cause)}", Ms(h.Ms))).ToList() ?? [];
+    // the same list while the report is the same: a new one makes the slow-frames list rebuild every row at each refresh
+    public IReadOnlyList<DetailRow> HitchRows => hitchRows.Report == F ? hitchRows.Rows
+        : (hitchRows = (F, F?.Hitches.Select(h => new DetailRow($"{Clock(h.At)}  {Cause(h.Cause)}", Ms(h.Ms))).ToList() ?? [])).Rows;
+    (FrameReport? Report, IReadOnlyList<DetailRow> Rows) hitchRows = (null, []);
     public static string HitchTip(Hitch h) => $"{Clock(h.At)} · {Ms(h.Ms)} · {Cause(h.Cause)}";
     static string Clock(TimeSpan t) => $"{(int)t.TotalMinutes}:{t.Seconds:00}";
     public bool HasHitchRows => F?.Hitches.Count > 0;
@@ -1257,7 +1261,7 @@ public sealed class SettingsVm : Bindable
         {
             var games = App.Core.Games;
             var skipped = games.Where(g => g.RecorderSkip is ScsKiller.SkipAntiCheat or ScsKiller.SkipShaderMod or ScsKiller.SkipForeignDll or ScsKiller.SkipModNotChainable
-                    or ScsKiller.SkipVulkanMod or ScsKiller.SkipNeedsAdmin)
+                    or ScsKiller.SkipVulkanMod or ScsKiller.SkipNeedsAdmin or ScsKiller.SkipPackageD3D12)
                 .GroupBy(g => g.RecorderSkip).OrderByDescending(x => x.Count()).Select(x => $" · {x.Count()} skipped: {x.Key}");
             int n = games.Count(g => g.RecorderInstalled);
             return $"Recording in {n} game{(n == 1 ? "" : "s")}" + string.Concat(skipped);
@@ -1288,6 +1292,8 @@ public sealed class SettingsVm : Bindable
         }
     }
     public bool? NotifyNewShaders { get => S.NotifyNewShaders; set { if (value is { } v && v != S.NotifyNewShaders) S = S with { NotifyNewShaders = v }; } }
+    public bool? ScanAtStart { get => S.ScanAtStart; set { if (value is { } v && v != S.ScanAtStart) S = S with { ScanAtStart = v }; } }
+    public bool? CloseQuits { get => S.CloseQuits; set { if (value is { } v && v != S.CloseQuits) S = S with { CloseQuits = v }; } }
 
 
     public double Threads { get => S.Threads; set { if ((int)value != S.Threads) S = S with { Threads = (int)value }; } }
@@ -1383,8 +1389,9 @@ public sealed class AccountVm : Bindable
     public bool OffersBackToStable => Updater.Installed && AppVersion.Current.Channel != UpdateChannels.Stable;
     public bool ShowsUpdates => ShowsChannels || OffersBackToStable;
     public string ChannelNote => Updater.Checking ? "Checking for updates…"
-        : Updater.Ready is { } v ? $"SCSKiller {v} is ready: it installs when you quit, or use Restart to update at the top."
-        : "Updates download in the background and install when you quit SCSKiller, never during a compile. Leaving an early channel keeps this build until Stable passes it.";
+        : Updater.Ready is { } v ? AutoInstall.ReadyNote(v, App.Core.Settings)
+        : (App.Core.Settings.InstallUpdatesAutomatically ? "Updates download in the background and install the next time SCSKiller starts or quits, never during a compile or a game."
+            : "Updates download in the background; Restart to update installs them.") + " Leaving an early channel keeps this build until Stable passes it.";
     public string? UpdateProblem => Updater.Problem;
     public bool HasUpdateProblem => Updater.Problem != null;
 }

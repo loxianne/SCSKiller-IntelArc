@@ -221,7 +221,7 @@
                             <CheckBox IsChecked="{x:Bind Vm.MaximumPlans, Mode=TwoWay}" AutomationProperties.Name="Maximum mode: also compile every shader pairing">
                                 <StackPanel Spacing="2">
                                     <TextBlock Text="Maximum mode: also compile every shader pairing" TextWrapping="Wrap" />
-                                    <TextBlock Text="Every shader is compiled either way, and the driver reuses each one in any pairing. Maximum also builds every pairing up front: a much longer compile and a bigger cache, for well under 1 ms saved per new pairing in game."
+                                    <TextBlock Text="Seems to help most on AMD. Compiles take longer and use more disk space."
                                                Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </CheckBox>
@@ -235,7 +235,21 @@
                         <CheckBox IsChecked="{x:Bind Vm.StartWithWindows, Mode=TwoWay}" AutomationProperties.Name="Start SCSKiller when Windows starts">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="Start SCSKiller when Windows starts" TextWrapping="Wrap" />
-                                <TextBlock Text="It waits in the notification area, next to the clock, to offer a rebuild after a driver update. Closing the window keeps it there; right-click its icon to quit."
+                                <TextBlock Text="It waits in the notification area, next to the clock, to offer a rebuild after a driver update."
+                                           Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </CheckBox>
+                        <CheckBox IsChecked="{x:Bind Vm.CloseQuits, Mode=TwoWay}" AutomationProperties.Name="Closing the window quits SCSKiller">
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Closing the window quits SCSKiller" TextWrapping="Wrap" />
+                                <TextBlock Text="A running compile finishes saving first, like Quit in the notification area. Off: closing the window keeps SCSKiller there; right-click its icon to quit."
+                                           Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </CheckBox>
+                        <CheckBox IsChecked="{x:Bind Vm.ScanAtStart, Mode=TwoWay}" AutomationProperties.Name="Scan games when SCSKiller starts">
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="Scan games when SCSKiller starts" TextWrapping="Wrap" />
+                                <TextBlock Text="Reads again what changed in each game's folders. Off: the last list shows, and a game is read again when you refresh, when it exits, or when Steam or the Xbox app updates it."
                                            Style="{StaticResource Caption}" TextWrapping="Wrap" />
                             </StackPanel>
                         </CheckBox>

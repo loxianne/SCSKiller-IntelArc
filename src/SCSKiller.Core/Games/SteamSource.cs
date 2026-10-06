@@ -13,6 +13,10 @@ public sealed class SteamSource(string? steamRoot = null) : IGameSource
 
     (string Stamp, HashSet<uint> Asked, Dictionary<uint, string> Types)? _types;   // appinfo.vdf is only re-read when it changes
 
+    /// <summary>Games listed before, by id: a game's exe is reused while its build and install folder are the same and the
+    /// exe is there, instead of looking through its folders again.</summary>
+    public IReadOnlyDictionary<string, Game>? Known { get; set; }
+
     public IReadOnlyList<Game> Discover()
     {
         var root = steamRoot ?? Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) as string
@@ -33,8 +37,11 @@ public sealed class SteamSource(string? steamRoot = null) : IGameSource
                 if (!uint.TryParse(V("appid"), out var id) || V("installdir") is not { } dir) continue;
                 if (!int.TryParse(V("StateFlags"), out var flags) || (flags & 4) == 0) continue;   // 4 = fully installed
                 var install = Path.Combine(apps, "common", dir);
-                if (GameFiles.FindExe(install) is not { } exe) continue;
-                installed.Add((id, new Game($"steam:{id}", V("name") ?? dir, Store.Steam, install, exe, V("buildid"))));
+                var build = V("buildid");
+                var exe = Known?.GetValueOrDefault($"steam:{id}") is { Version: { } was } k && was == build && k.InstallDir.Equals(install, StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(k.ExePath) ? k.ExePath : GameFiles.FindExe(install);
+                if (exe == null) continue;
+                installed.Add((id, new Game($"steam:{id}", V("name") ?? dir, Store.Steam, install, exe, build)));
             }
         }
         var types = TypesOf(Path.Combine(root, "appcache", "appinfo.vdf"), installed.Select(a => a.Id).ToHashSet());
@@ -78,6 +85,30 @@ public sealed class SteamSource(string? steamRoot = null) : IGameSource
         {
             using var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16);
             var r = new BinaryReader(f);
+            var stamp = $"{Path.GetFullPath(path)}|{f.Length}|{File.GetLastWriteTimeUtc(f.SafeFileHandle).Ticks}";
+            var apps = new Dictionary<uint, Dictionary<string, object>>();
+            void Add(uint id, byte[] bytes, string[]? keys)
+            {
+                var entry = new BinaryReader(new MemoryStream(bytes, writable: false));
+                entry.BaseStream.Position = 4 + 4 + 8 + 20 + 4 + 20;   // infoState, lastUpdated, picsToken, sha1, changeNumber, binary sha1
+                try
+                {
+                    var kv = Object(entry, keys);
+                    apps[id] = kv.GetValueOrDefault("appinfo") as Dictionary<string, object> ?? kv;
+                }
+                catch (Exception e) when (e is InvalidDataException or EndOfStreamException or IndexOutOfRangeException) { }
+            }
+            lock (indexGate)
+                if (indexed is { } known && known.Stamp == stamp)
+                {
+                    foreach (var id in ids)
+                        if (known.Index.TryGetValue(id, out var at))
+                        {
+                            f.Position = at.Offset;
+                            Add(id, r.ReadBytes((int)at.Size), known.Keys);
+                        }
+                    return apps;
+                }
             var magic = r.ReadUInt32();
             r.ReadUInt32();   // universe
             string[]? keys = null;
@@ -91,20 +122,15 @@ public sealed class SteamSource(string? steamRoot = null) : IGameSource
                 f.Position = start;
             }
             else if (magic != 0x07564428) return null;
-            var apps = new Dictionary<uint, Dictionary<string, object>>();
+            var index = new Dictionary<uint, (long, uint)>();
             for (uint id; (id = r.ReadUInt32()) != 0;)
             {
                 var size = r.ReadUInt32();
+                index[id] = (f.Position, size);
                 if (!ids.Contains(id)) { f.Seek(size, SeekOrigin.Current); continue; }
-                var entry = new BinaryReader(new MemoryStream(r.ReadBytes((int)size), writable: false));
-                entry.BaseStream.Position = 4 + 4 + 8 + 20 + 4 + 20;   // infoState, lastUpdated, picsToken, sha1, changeNumber, binary sha1
-                try
-                {
-                    var kv = Object(entry, keys);
-                    apps[id] = kv.GetValueOrDefault("appinfo") as Dictionary<string, object> ?? kv;
-                }
-                catch (Exception e) when (e is InvalidDataException or EndOfStreamException or IndexOutOfRangeException) { }
+                Add(id, r.ReadBytes((int)size), keys);
             }
+            lock (indexGate) indexed = (stamp, index, keys);
             return apps;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or IndexOutOfRangeException)
@@ -112,6 +138,10 @@ public sealed class SteamSource(string? steamRoot = null) : IGameSource
             return null;   // EndOfStreamException is an IOException
         }
     }
+
+    // the file last read whole: where each app's entry is, so that another app is read alone while the file stays the same
+    static (string Stamp, Dictionary<uint, (long Offset, uint Size)> Index, string[]? Keys)? indexed;
+    static readonly Lock indexGate = new();
 
     /// <summary>A binary KeyValues object up to its end marker: nested objects and strings kept, numbers skipped.</summary>
     static Dictionary<string, object> Object(BinaryReader r, string[]? keys, int depth = 0)

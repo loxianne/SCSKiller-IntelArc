@@ -97,7 +97,7 @@ public sealed class ManualSource(AppStore store) : IGameSource
 
     /// <summary>The game an exe the user picked belongs to: its install root (Unreal's, above Engine\ and
     /// &lt;Project&gt;\Binaries; REDengine's, above bin\x64), the process that creates the D3D12 device found as for the
-    /// stores (<see cref="GameFiles.FindExe"/>: a launcher stub becomes its Shipping exe), and a name. ArgumentException
+    /// stores (<see cref="GameFiles.GameExe"/>, <see cref="GameFiles.FindExe"/>: a launcher stub becomes its Shipping exe), and a name. ArgumentException
     /// with the message to show for a pick that is no 64-bit program, sits at a drive's root, or launches one of several
     /// exes SCSKiller can't tell apart.</summary>
     public static ManualEntry Resolve(string picked)
@@ -112,9 +112,9 @@ public sealed class ManualSource(AppStore store) : IGameSource
         // as discovery: no import table is read in an install with anti-cheat
         var clean = GameFiles.DetectAntiCheat(new Game("", "", Store.Manual, root, pick)) == AntiCheat.None;
         var graphics = clean ? GameFiles.ImportsGraphics(pick) : null;
-        var exe = graphics == true ? pick : GameFiles.FindExe(root, Path.GetRelativePath(root, pick)) ?? pick;
+        var exe = graphics == true || GameFiles.IsShipping(pick) ? GameFiles.GameExe(root, pick) : GameFiles.FindExe(root, Path.GetRelativePath(root, pick)) ?? pick;
         if (Same(exe, pick) && graphics == false)   // a launcher FindExe kept: the one exe of the install that loads D3D, if there is one
-            switch (GameFiles.GraphicsExes(root).Where(f => !Same(f, pick)).ToList())
+            switch (GameFiles.GraphicsExes(root).Where(f => !Same(f, pick) && X64(f)).ToList())   // a 32-bit launcher is never the game
             {
                 case [var one]: exe = one; break;
                 case { Count: > 1 } several:
@@ -127,6 +127,12 @@ public sealed class ManualSource(AppStore store) : IGameSource
     }
 
     static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    static bool X64(string path)
+    {
+        try { CheckX64(path, Path.GetFileName(path)); return true; }
+        catch (ArgumentException) { return false; }
+    }
 
     static void CheckX64(string path, string file)
     {

@@ -25,6 +25,9 @@ public static class RtCollections
     /// recorded collections that the synthesis rebuilds byte for byte.</summary>
     public sealed record Rule(string GlobalRs, uint Flags, uint Depth, uint Payload, uint Attributes, bool Verified);
 
+    /// <summary>A collection's flags when it has no state object config subobject (UE 4.25 creates them without one).</summary>
+    public const uint NoConfig = uint.MaxValue;
+
     /// <summary>UE 4.26's global ray tracing root signature as Jedi: Survivor's recording has it (the stock rule is read
     /// from it, unverified on other 4.26/4.27 games): NVAPI's extension UAV u0 space 404, then in space 1 (the RHI's
     /// global ray tracing space) an SRV table of 64, a sampler table of 16, a UAV table of 16 and root CBVs b0-b15, all
@@ -33,6 +36,10 @@ public static class RtCollections
         [0, 0, 1, 1, 0, 404, 3],
         [0, 0, 0, 64, 0, 1, 5], [0, 0, 3, 16, 0, 1, 1], [0, 0, 1, 16, 0, 1, 3],
         .. Enumerable.Range(0, 16).Select(b => new uint[] { 2, 0, (uint)b, 1, 8 })]);
+
+    /// <summary>UE 4.25's (Returnal's recording): 4.26's without the NVAPI slot, with 4.25's static samplers
+    /// (<see cref="RootSig.StaticSamplers"/>).</summary>
+    public static readonly RootSig.Desc Ue425Global = new(0, [.. Ue426Global.Rows.Skip(1)]);
 
     /// <summary>UE 5.1's (Oblivion Remastered's recording): 4.26's without the NVAPI slot, plus the diagnostic root UAV u0 space 999.</summary>
     public static readonly RootSig.Desc Ue51Global = new(0, [
@@ -182,7 +189,7 @@ public static class RtCollections
             Sub(11).Str($"HitGroup_{nameHash}" + (g > 0 ? $"_{g}" : "")).U32(Of(8) != null ? 1u : 0).Str(Of(9)).Str(Of(10)).Str(Of(8));
         }
         Sub(10).U32(depth);
-        Sub(0).U32(flags);
+        if (flags != NoConfig) Sub(0).U32(flags);
         Sub(1).Hash(global);
         var local = subs;
         Sub(2).Hash(rayGen ? localRayGen : localOther);
@@ -209,7 +216,7 @@ public static class RtCollections
         {
             if (U() != 0) return null;
             string? lib = null, global = null, local = null, name = null;
-            uint payload = 0, attr = 0, depth = 0, flags = 0;
+            uint payload = 0, attr = 0, depth = 0, flags = NoConfig;
             for (var n = U(); n > 0; n--)
                 switch (U())
                 {

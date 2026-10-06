@@ -14,13 +14,37 @@ public static class D3DSCache
         var found = new List<string>();
         if (!Directory.Exists(root)) return found;
         foreach (var dir in Directory.EnumerateDirectories(root))
-            try
-            {
-                if (ExePaths(dir) is { Count: > 0 } paths && paths.All(p => IsGameExe(p, g))) found.Add(dir);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }   // skip on doubt
+            if (IsGames(dir, g) == true) found.Add(dir);
         return found;
     }
+
+    /// <summary>True: every exe path the folder names is the game's; false: a db names another exe (its WAL never read);
+    /// null on doubt (an unreadable file, no path).</summary>
+    public static bool? IsGames(string dir, Game g)
+    {
+        try
+        {
+            var files = new DirectoryInfo(dir).GetFiles();
+            var dbs = files.Where(f => f.Name.EndsWith(".dxcache", StringComparison.OrdinalIgnoreCase)).ToList();
+            var stamp = string.Join('|', dbs.Select(f => $"{f.Name}:{f.Length}:{f.LastWriteTimeUtc.Ticks}"));
+            if (!DbPaths.TryGetValue(dir, out var known) || known.Stamp != stamp)
+            {
+                var read = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!dbs.All(f => ReadAppIds(f.FullName, read))) return null;
+                DbPaths[dir] = known = (stamp, read);
+            }
+            // measured: reading every folder's WAL allocated 13 GB for 14,000 folders
+            if (!known.Paths.All(p => IsGameExe(p, g))) return false;
+            var paths = new HashSet<string>(known.Paths, StringComparer.OrdinalIgnoreCase);
+            foreach (var f in files.Where(f => f.Name.EndsWith(".dxcache-wal", StringComparison.OrdinalIgnoreCase))) ReadWal(f.FullName, paths);
+            return paths.Count == 0 ? null : paths.All(p => IsGameExe(p, g));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    // folder -> its dbs' names, sizes and write times, and the exe paths they hold; the WAL isn't kept
+    // ponytail: never pruned, a deleted folder's entry stays until the app restarts (a few MB at 14,000 folders)
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Stamp, HashSet<string> Paths)> DbPaths = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Null when a db can't be read.</summary>
     public static HashSet<string>? ExePaths(string dir)
@@ -31,14 +55,16 @@ public static class D3DSCache
             {
                 if (!ReadAppIds(f, paths)) return null;
             }
-            else if (f.EndsWith(".dxcache-wal", StringComparison.OrdinalIgnoreCase))
-            {
-                using var s = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                var bytes = new byte[s.Length];
-                s.ReadExactly(bytes);
-                foreach (Match m in WalExe.Matches(Encoding.UTF8.GetString(bytes))) paths.Add(m.Value);   // SQLite text is UTF-8
-            }
+            else if (f.EndsWith(".dxcache-wal", StringComparison.OrdinalIgnoreCase)) ReadWal(f, paths);
         return paths;
+    }
+
+    static void ReadWal(string file, HashSet<string> paths)
+    {
+        using var s = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var bytes = new byte[s.Length];
+        s.ReadExactly(bytes);
+        foreach (Match m in WalExe.Matches(Encoding.UTF8.GetString(bytes))) paths.Add(m.Value);   // SQLite text is UTF-8
     }
 
     static readonly Regex WalExe = new(@"[A-Za-z]:\\[^\x00-\x1F\x7F�]{3,}?\.[Ee][Xx][Ee]");   // U+FFFD: a byte that isn't UTF-8 text ends a path

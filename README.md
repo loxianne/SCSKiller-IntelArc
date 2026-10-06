@@ -210,3 +210,16 @@ libraries ([LICENSE-EXCEPTION.txt](LICENSE-EXCEPTION.txt)). Third-party componen
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Code signing policy: [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
 
 Not affiliated with any GPU maker, engine maker or game publisher. All product names are trademarks of their owners.
+
+### Forks
+
+Forks are welcome under the licence. Please give yours its own name, say it's unofficial and based on SCSKiller, and
+keep the SCSKiller copyright notices. The measurements and screenshots in this README are SCSKiller's own, so please
+don't present them as a fork's.
+
+Official builds come only from this repository's [Releases](https://github.com/BlueHeisenberg/SCSKiller/releases) page.
+A fork's builds, bugs and anti-cheat behaviour are its author's: SCSKiller keeps its recorder out of anti-cheat games,
+and can't vouch for a fork that changes that.
+
+Improvements are always welcome back here as pull requests. Fixes, games and ideas from forks make SCSKiller better
+for everyone.

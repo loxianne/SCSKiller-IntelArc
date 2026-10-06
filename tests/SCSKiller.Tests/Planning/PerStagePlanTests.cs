@@ -129,6 +129,71 @@ public class PerStagePlanTests(ITestOutputHelper output)
 
     /// <summary>[WaveSize] compute on the readers' "&lt;platform&gt; wave&lt;N&gt;" platforms: NVIDIA (32 lanes only) plans none of
     /// it, AMD (32 and 64 lanes) the platforms whose range takes 64.</summary>
+    /// <summary>No root-signature rule (RE Engine): a stage set resolves only by its counts as a recorded PSO has them, and a
+    /// material file can link thousands of VSs with thousands of PSs. Only what a recorded counts key has is paired: 12
+    /// stage sets, not 9M.</summary>
+    [Fact]
+    public void LearnedLookupPairsOnlyRecordedCounts()
+    {
+        var re = new EngineInfo("RE Engine", "PAK 4.2", null, "D3D12", false, null);
+        ShaderInfo[] vss = [.. Enumerable.Range(0, 3000).Select(i => Vs($"re-vs{i}", In("POSITION", 0, 0, 7)) with { Counts = new(1, i % 1000, 0, 0) })];
+        ShaderInfo[] pss = [.. Enumerable.Range(0, 3000).Select(i => Ps($"re-ps{i}", Target(0)) with { Counts = new(1, i % 1000, 0, 0) })];
+        var all = vss.Concat(pss).ToList();
+        var index = new ShaderIndex("synthetic", ["PCD3D_SM6"], all.ToDictionary(s => s.Sha1), [new ShaderMap("m", "re_chunk_000.pak|0", "PCD3D_SM6", all.Select(s => s.Sha1).ToList())]);
+        var dir = Ff7.TempDir("perstage-learned");
+        var db = Path.Combine(dir, "recording.db");
+        var (rs, blob) = Rs(Cs1); // not what the fallback rule builds for a VS+PS: the lookup is learned
+        using (var f = File.Create(db))
+        {
+            WriteBlob(f, rs, blob);
+            Write(f, 'S', Gfx(rs, vss[0], pss[0], Layout1, [R16G16B16A16Float]).Payload);
+        }
+        var counted = new[] { 0, 1000, 2000 }.SelectMany(i => new[] { vss[i].Sha1, pss[i].Sha1 }).ToHashSet();
+        foreach (var caps in new[] { Ff7.Nvidia with { PerStageCache = true }, Ff7.Amd })
+        {
+            var plan = new Planner().Build(Ff7.Game, re, index, new Recording(db), caps, Path.Combine(dir, caps.Profile), null, CancellationToken.None);
+            // VS 0, 1000, 2000 alone and with PS 0, 1000, 2000 (their counts are recorded), and each other shader once, left out
+            Assert.Equal(3 + 3 * 3 + (6000 - 6), plan.Stats.StageSets);
+            Assert.Equal(6000 - 6 + 3, plan.Stats.LeftOut); // and the 3 VSs alone: a learned lookup has no VS-only key
+            var psos = Psos(plan);
+            Assert.NotEmpty(psos);
+            Assert.All(psos, p => Assert.Subset(counted, p.State.Stages.Values.ToHashSet()));
+        }
+    }
+
+    /// <summary>A learned lookup's coverage counts what it doesn't pair: a PS whose VSs were never recorded with its counts
+    /// (Q links only to A; A and Q are each recorded, not together) is left out, and a DXIL library, no raster stage set,
+    /// isn't counted at all.</summary>
+    [Fact]
+    public void LearnedLookupCountsUnrecordedPairsAsLeftOut()
+    {
+        var re = new EngineInfo("RE Engine", "PAK 4.2", null, "D3D12", false, null);
+        var extra = new SigElement("TEXCOORD", 1, 2, 0x3, 0, 3);
+        var vsA = Shader("la-vsA", Stage.Vertex, [In("POSITION", 0, 0, 7)], [PosOut, UvOut, extra]) with { Counts = new(1, 1, 0, 0) };
+        var vsB = Vs("la-vsB", In("POSITION", 0, 0, 7)) with { Counts = new(1, 2, 0, 0) };
+        var psP = Ps("la-psP", Target(0)) with { Counts = new(1, 2, 0, 0) };
+        var psX = Ps("la-psX", Target(0)) with { Counts = new(1, 1, 0, 0) };   // links to B, recorded only with A
+        var psQ = Shader("la-psQ", Stage.Pixel, [PosOut, UvOut, extra], [Target(0)]) with { Counts = new(1, 2, 0, 0) };   // links to A, recorded only with B
+        var lib = Shader("la-lib", Stage.Library, []);
+        var dir = Ff7.TempDir("perstage-learned-left");
+        var db = Path.Combine(dir, "recording.db");
+        var (rs, blob) = Rs(Cs1);
+        using (var f = File.Create(db))
+        {
+            WriteBlob(f, rs, blob);
+            Write(f, 'S', Gfx(rs, vsB, psP, Layout1, [R16G16B16A16Float]).Payload);
+            Write(f, 'S', Gfx(rs, vsA, psX, Layout1, [R16G16B16A16Float]).Payload);
+        }
+        foreach (var withLib in new[] { false, true })
+        {
+            ShaderInfo[] all = withLib ? [vsA, vsB, psP, psX, psQ, lib] : [vsA, vsB, psP, psX, psQ];
+            var index = new ShaderIndex("synthetic", ["PCD3D_SM6"], all.ToDictionary(s => s.Sha1), [new ShaderMap("m", "re_chunk_000.pak|0", "PCD3D_SM6", all.Select(s => s.Sha1).ToList())]);
+            var plan = new Planner().Build(Ff7.Game, re, index, new Recording(db), Ff7.Nvidia with { PerStageCache = true }, Path.Combine(dir, $"lib{withLib}"), null, CancellationToken.None);
+            // A and B alone (no VS-only key), B+P, then X and Q left out once each
+            Assert.Equal((5L, 4L), (plan.Stats.StageSets, plan.Stats.LeftOut));
+        }
+    }
+
     [Fact]
     public void WaveSizePlatformsOnlyOnAmd()
     {

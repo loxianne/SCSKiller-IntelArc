@@ -264,6 +264,7 @@ sealed class PlanBuilder
         plat = !dx12 ? "" : plats.Count > 0 ? plats.MaxBy(p => p.Value).Key // "": no map matches, no PSOs
             : new[] { "PCD3D_SM6", "PCD3D_SM5" }.FirstOrDefault(index.Platforms.Contains) ?? index.Platforms.FirstOrDefault() ?? "";
         embeddedRs = bc.Values.Count(s => s.RootSignature != null);
+        if (!build && embeddedRs == 0 && !maps.Any(m => m.Pooled)) Learned();
         rasterNv = RasterNv(caps, rule, recs, nvRecs);
         if (rasterNv is { } nvs) log?.Report($"NVAPI: synthesized PSOs get shader-extension slot {nvs.Slot} space {nvs.Space} (options {nvs.Options})");
         var ownOnly = embeddedRs > 0 && ownN == builtN; // every recorded PSO the rule was checked on carries its own: the rule plans nothing
@@ -313,6 +314,27 @@ sealed class PlanBuilder
     }
 
     string? unserializable;   // the first serializer error
+
+    // a learned lookup's stage and counts parts (Planner.CountsKey), and of its VS+PS keys the VS parts per PS part
+    HashSet<string>? learnedParts;
+    readonly Dictionary<string, HashSet<string>> learnedVs = [];
+    int unpaired;   // the shaders StageSets left out or paired only in part for it
+
+    static string Part(ShaderInfo s) => $"{(int)s.Stage}:{s.Counts}";
+
+    /// <summary>A learned lookup resolves a stage set only by its counts key, so StageSets pairs only what a recorded key has:
+    /// each shader's part, and a VS->PS pair's two (RE Engine: 13.5M of PRAGMATA's 13.6M stage sets had no root signature,
+    /// 46 s and 5.7 GB to enumerate). Not with a pooled library: whether a PS is fed in its own map counts every VS there.</summary>
+    void Learned()
+    {
+        learnedParts = [];
+        foreach (var parts in rsByCounts.Keys.Select(k => k.Split(';')))
+        {
+            learnedParts.UnionWith(parts);
+            if (parts is [var vs, var ps] && vs.StartsWith($"{(int)Stage.Vertex}:") && ps.StartsWith($"{(int)Stage.Pixel}:"))
+                (learnedVs.TryGetValue(ps, out var l) ? l : learnedVs[ps] = []).Add(vs);
+        }
+    }
 
     readonly Dictionary<string, RootSig.Ranges?> rsRanges = [];
     readonly Dictionary<(string Rs, string Sha, int Stage), bool> covered = [];
@@ -511,11 +533,17 @@ sealed class PlanBuilder
         // AMD's AGS intrinsics (a UAV in AGS_DX12_SHADER_INSTRINSICS_SPACE_ID): an AMD-only permutation, and no UE 4 root
         // signature has that slot (E_INVALIDARG): left out on other vendors, counted once per shader ("vendor_extension")
         var ags = new HashSet<string>();
+        var unpairedShaders = new HashSet<string>();
         bool Usable(string h)
         {
             if (!bc.TryGetValue(h, out var s)) return false;
-            if (caps.Profile.StartsWith("amd") || !s.Bindings.Any(b => b.Space == AgsSpace)) return true;
-            ags.Add(h);
+            if (!caps.Profile.StartsWith("amd") && s.Bindings.Any(b => b.Space == AgsSpace))
+            {
+                ags.Add(h);
+                return false;
+            }
+            if (learnedParts == null || s.Stage == Stage.Library || learnedParts.Contains(Part(s))) return true; // libraries: not raster stage sets
+            unpairedShaders.Add(h);
             return false;
         }
         var fed = new HashSet<string>();
@@ -551,11 +579,23 @@ sealed class PlanBuilder
                 if (d.Stage == Stage.Geometry) Planner.Push(gss, Planner.Sig(d.Outputs), d);
             }
             var mss = ds.Where(d => d.Stage == Stage.Mesh).ToList();
+            var byPart = new Dictionary<string, ILookup<string, (int At, ShaderInfo Vs)>>();
+            // the VSs of a PS's input signature, in map order; a PS that loses one to the lookup is left out once (whether the
+            // lost VS links isn't checked: that is the cross product)
+            List<ShaderInfo> Feeding(string pin, ShaderInfo p)
+            {
+                var all = srcs.GetValueOrDefault(pin, []);
+                if (learnedParts == null) return all;
+                if (!byPart.TryGetValue(pin, out var l)) byPart[pin] = l = all.Select((v, i) => (i, v)).ToLookup(x => Part(x.v));
+                var kept = learnedVs.TryGetValue(Part(p), out var parts) ? parts.SelectMany(v => l[v]).OrderBy(x => x.At).Select(x => x.Vs).ToList() : [];
+                if (kept.Count < all.Count) unpairedShaders.Add(p.Sha1);
+                return kept;
+            }
             foreach (var p in ds.Where(d => d.Stage == Stage.Pixel))
             {
                 var pin = Planner.Sig(p.Inputs);
                 var n = 0;
-                foreach (var s in srcs.GetValueOrDefault(pin, []).Where(s => Planner.Rasterizable(s) && Planner.Links(s, p) && Planner.SameRs(s, p))
+                foreach (var s in Feeding(pin, p).Where(s => Planner.Rasterizable(s) && Planner.Links(s, p) && Planner.SameRs(s, p))
                     .Concat(mss.Where(m => Planner.Rasterizable(m) && Planner.MeshFeeds(m, p) && Planner.SameRs(m, p))))
                 {
                     n++;
@@ -659,6 +699,8 @@ sealed class PlanBuilder
         }
 
         if (engine.Family == "Unreal" && engine.Version.StartsWith("5.")) SharedAcrossMaps(sink, Usable);
+        // once per shader, as a stage set left out (the plan's StageSets and LeftOut): its stage sets aren't enumerated
+        if ((unpaired = unpairedShaders.Count) > 0) stats["no_rs"] = stats.GetValueOrDefault("no_rs") + unpaired;
     }
 
     /// <summary>A shader in at least 1 of every <see cref="SharedMaps"/> material maps doesn't depend on the material (a default
@@ -701,7 +743,7 @@ sealed class PlanBuilder
     /// caches collections on their own, <see cref="Planner.RtCollectionCache"/>), one 'Y' record per library no recorded
     /// state object has. The rule comes from the recording's collections when it has some (checked: each one whose library
     /// is recorded is rebuilt byte for byte, names included), else (no recording, or one without state objects: ray tracing
-    /// off as played) for Unreal 4.26/4.27 from UE 4.26's source as Jedi: Survivor confirms it, or Avalanche's 4.27 fork's
+    /// off as played) for Unreal 4.25 <see cref="RtCollections.Ue425Global"/> and no state object config, for Unreal 4.26/4.27 from UE 4.26's source as Jedi: Survivor confirms it, or Avalanche's 4.27 fork's
     /// when its libraries carry the fork's bindless marker (<see cref="RtCollections.GlobalFor"/>), and for Unreal 5.0-5.4
     /// <see cref="RtCollections.Ue51Global"/> (5.4: <see cref="RtCollections.Ue54Global"/>) when the libraries have 5.1's
     /// binding shape (<see cref="RtCollections.Ue5ShapeMismatch"/>; verified on 5.1 only); for Northlight its own global and local root
@@ -714,7 +756,7 @@ sealed class PlanBuilder
         if (libs.Count == 0) return;
         if (engine.NoRtPipelines)
         {
-            log?.Report($"ray tracing: {libs.Count} DXIL libraries; the game's Windows device profile sets r.RayTracing.AllowPipeline=0: none synthesized");
+            log?.Report($"ray tracing: {libs.Count} DXIL libraries; the game's config turns ray tracing pipelines off (r.RayTracing or r.RayTracing.AllowPipeline): none synthesized");
             return;
         }
         if (this.rule == RootSig.Rule.Red3) { Red3HitGroups(libs.Count); return; }
@@ -748,6 +790,15 @@ sealed class PlanBuilder
             if (!rule.Verified) { log?.Report($"ray tracing: {libs.Count} DXIL libraries; collection rule {how}: not the engine's rule, none synthesized"); return; }
         }
         // a recording without state objects (ray tracing off as played) teaches nothing about them: the rules below, as without one
+        else if (engine.Family == "Unreal" && engine.Version == "4.25")
+        {
+            var (h, b) = RtCollections.Serialize(RtCollections.Ue425Global, RootSig.StaticSamplers(RootSig.Rule.Ue425));
+            rsBlobs[h] = b;
+            // no state object config, depth 1, triangle barycentrics, the material payload (64); 2 of Returnal's 403 are only
+            // in a 24-byte pipeline
+            rule = new(h, RtCollections.NoConfig, 1, 64, 8, false);
+            how = "UE 4.25's (Returnal's recording: 401 of its 403 collections rebuilt from its files, the other 2 at a 24-byte payload)";
+        }
         else if (engine.Family == "Unreal" && engine.Version is "4.26" or "4.27")
         {
             var desc = RtCollections.GlobalFor(libs.Select(l => bc[l]));
@@ -958,7 +1009,7 @@ sealed class PlanBuilder
             new PlanStats(recs.Count + stateObjects.Count, items.Count + synthesized.Count + rtItems.Count + hitGroupItems.Count, synthesized.Count, usedRs.Count, dx12 && (verified || embeddedRs > 0),
                 unitsBy[(int)Provenance.Exact], unitsBy[(int)Provenance.Inferred], unitsBy[(int)Provenance.Guessed], layoutCoverage, n11, packNew,
                 stats.GetValueOrDefault("rs_uncovered"), rtLibs, inlineOnly || engine.NoRtPipelines ? 0 : rtLibs - rtCovered,
-                StageSets: seen.Count, LeftOut: new[] { "no_rs", "no_template", "no_gs_template", "rs_uncovered", "stream_output" }.Sum(stats.GetValueOrDefault),
+                StageSets: seen.Count + unpaired, LeftOut: new[] { "no_rs", "no_template", "no_gs_template", "rs_uncovered", "stream_output" }.Sum(stats.GetValueOrDefault),
                 MiddlewareSharedItems: packShared, RtStateObjects: replayable.Count, RtInline: rtInline),
             Path.Combine(outDir, "plan.bin"));
         PlanFile.Write(plan, body);

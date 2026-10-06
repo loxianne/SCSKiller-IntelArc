@@ -507,7 +507,7 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
     /// another order each launch: in session 1791029034388, 29 additions were byte for byte an earlier session's on another
     /// base. The recording keeps every record as recorded; on NVIDIA, whose key leaves export names out and which caches an
     /// addition whatever it grows, the count of new pipelines takes those as nothing new and a new material as one. AMD
-    /// caches a whole state object: there each new record counts.</summary>
+    /// caches a whole state object and its chain: no later launch creates one of these again, so none counts there.</summary>
     [Fact]
     public void Re_ordered_additions_of_known_materials_count_as_new_only_where_the_driver_needs_them()
     {
@@ -528,7 +528,28 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
 
         Assert.Equal(Keys([.. session1, .. session2]), Keys(PsoDb.Read(store).Where(r => r.Tag != 'N')));   // every record as recorded: a warm replays what the game created
         Assert.Equal([session2[^1].Key], Inputs(store, true).Where(i => !WarmInputs.Taken(warmedNv, i)).SelectMany(WarmInputs.Records));
-        Assert.Equal(Keys(session2).Order(), Inputs(store, false).Where(i => !WarmInputs.Taken(warmedAmd, i)).Select(WarmInputs.Key).Order());
+        Assert.Empty(Pending(warmedAmd, Inputs(store, false)));
+    }
+
+    /// <summary>On AMD a state object counts only if a later launch can create it again: not one with a launch's alias, nor
+    /// an addition or a pipeline linking a collection that builds on one, though the warm replays them all. The Witcher 3
+    /// recorded about 40 such records every session, each counted as new after every compile.</summary>
+    [Fact]
+    public void On_AMD_a_launch_s_state_objects_never_count_as_new()
+    {
+        var store = Path.Combine(_dir, "recording.db");
+        var plain = new PsoDb.Rec('R', So(null, Library(new('4', 40), ("Shade", null)), Rs(1, new('9', 40))));
+        Recordings.Merge(store, Raw("s1.db", plain), null);
+        var warmed = Baseline(Inputs(store, false));
+        var launch = Pipeline("25B6436BA6B34F27");
+        var unnamed = new PsoDb.Rec('A', So(launch.Key, Rs(1, new('9', 40)), Library(new('5', 40), ("Hit", null))));   // no alias of its own
+        var onPlain = new PsoDb.Rec('A', So(plain.Key, Rs(1, new('9', 40)), Library(new('6', 40), ("Hit", null))));
+        var linked = new PsoDb.Rec('R', [.. U32(3), .. U32(1), .. U32(6), .. Convert.FromHexString(launch.Key), .. U32(0)]);   // links the launch's object as a collection
+        Recordings.Merge(store, Raw("s2.db", launch, Material(launch.Key, new('c', 40), new('a', 40), "0x1"), unnamed, onPlain, linked), null);
+
+        Assert.Equal([onPlain.Key], Pending(warmed, Inputs(store, false)));
+        Assert.Equal(4, WarmInputs.Recorded.Read([store], _ => true).LaunchOnly);
+        Assert.Equal(6, PsoDb.Read(store).Count(r => PsoDb.IsStateObject(r.Tag)));   // recorded, and replayed, as the game created them
     }
 
     /// <summary>Only a launch's alias is taken as one: a name given to another function (ExportToRename) ending in the
@@ -573,7 +594,8 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
 
     /// <summary>NVIDIA's key holds the NVAPI state a state object is replayed with, so a warm's key file must too: the
     /// object under a state recorded after the warm, with an alias of it under the same state, is one new pipeline there
-    /// until the next warm takes it. AMD has no NVAPI state: there only the new record counts. A crash names a record:
+    /// until the next warm takes it. AMD has no NVAPI state, and no later launch creates a launch's object again: nothing
+    /// counts there. A crash names a record:
     /// its identity's input stands for it.</summary>
     [Fact]
     public void A_state_object_under_another_NVAPI_state_is_new_on_NVIDIA_across_a_warm()
@@ -585,7 +607,7 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         Recordings.Merge(store, Raw("s2.db", a1, NvSpace(a1, 404), a2, NvSpace(a2, 404)), null);   // the game's NVAPI space changed, and its launch suffix
 
         Assert.Equal([a1.Key, a2.Key], Pending(nv, Inputs(store, true)));
-        Assert.Equal([a2.Key], Pending(amd, Inputs(store, false)));
+        Assert.Empty(Pending(amd, Inputs(store, false)));
         Assert.Empty(Pending(Baseline(Inputs(store, true)), Inputs(store, true)));
     }
 
@@ -613,7 +635,7 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         var (a, b, c) = (HitSo("25B6436BA6B34F27"), HitSo("6B09914CA188FA81"), new PsoDb.Rec('R', So(null, Library(new('4', 40), ("Other", null)), Rs(1, new('9', 40)))));
         var store = Path.Combine(_dir, "recording.db");
         Recordings.Merge(store, Raw("s1.db", a, NvSpace(a, 1001), b, NvSpace(b, 1001)), null);
-        var legacy = Baseline(Inputs(store, false));   // every record by its key, as the count kept them before
+        HashSet<string> legacy = [a.Key, b.Key];   // every record by its key, as the count kept them before
         Assert.Empty(Pending(legacy, Inputs(store, true)));
         Recordings.Merge(store, Raw("s2.db", c), null);
         Assert.Equal([c.Key], Pending(legacy, Inputs(store, true)));
@@ -632,6 +654,43 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
 
         Assert.Equal([a.Key], Pending(nv, Inputs(store, true)));
         Assert.Empty(Pending(amd, Inputs(store, false)));
+    }
+
+    // a 'G' payload as the recorder writes it: root signature, VS, PS, ..., the rasterizer's cull mode at 456
+    static PsoDb.Rec Gfx(string rs, string vs, string ps, uint cull = 3, byte[]? streamOutput = null)
+    {
+        var g = new byte[616];
+        Convert.FromHexString(rs).CopyTo(g, 0);
+        Convert.FromHexString(vs).CopyTo(g, 20);
+        Convert.FromHexString(ps).CopyTo(g, 40);
+        BitConverter.GetBytes(cull).CopyTo(g, 456);
+        return new('G', [.. g, .. streamOutput ?? []]);
+    }
+
+    /// <summary>NVIDIA compiles and caches each stage on its own, keyed on the shader, the whole root signature and the
+    /// NVAPI state, whatever the fixed-function state or the other stages (NvidiaBackend.Caps, ExactLayouts). A recorded
+    /// pipeline whose every stage a warm compiled before compiles nothing new there: The Witcher 3's second session
+    /// recorded 142 new pipelines, 80 of them other cull modes, depth biases or pairings of stages it had recorded. AMD
+    /// keys a stage on more of the pipeline: there each record counts.</summary>
+    [Fact]
+    public void On_NVIDIA_a_recorded_pipeline_of_stages_compiled_before_is_nothing_new()
+    {
+        string H(char c) => new(c, 40);
+        var (rs, a, a2, b, c, d) = (H('9'), H('a'), H('e'), H('b'), H('c'), H('d'));
+        PsoDb.Rec Nv(PsoDb.Rec r) => new PsoDb.NvState(r.Key, 12, 1, 1, 0).ToRec();
+        var store = Path.Combine(_dir, "recording.db");
+        var (ab, a2c) = (Gfx(rs, a, b), Gfx(rs, a2, c));
+        var s1 = Raw("s1.db", ab, Nv(ab), a2c, Nv(a2c));
+        Recordings.Merge(store, s1, null);
+        var (nv, amd) = (Baseline(Inputs(store, true)), Baseline(Inputs(store, false)));
+        var (culled, paired, unseen) = (Gfx(rs, a, b, cull: 1), Gfx(rs, a, c), Gfx(rs, a, d));
+        var streamed = Gfx(rs, a, b, streamOutput: [.. U32(0), .. U32(0), .. U32(uint.MaxValue)]);
+        Recordings.Merge(store, Raw("s2.db", culled, Nv(culled), paired, Nv(paired), unseen, Nv(unseen), streamed, Nv(streamed)), null);
+
+        Assert.Equal([unseen.Key, streamed.Key], Pending(nv, Inputs(store, true)));   // a stream output declaration isn't in the measured key: by its key
+        Assert.Equal([culled.Key, paired.Key, unseen.Key, streamed.Key], Pending(amd, Inputs(store, false)));
+        Assert.Empty(Pending(nv, WarmInputs.Of(WarmInputs.Recorded.Read([Raw("local.db", culled, Nv(culled)), s1], _ => true, true), null, [], _ => true)));   // another record first: the same stages
+        Assert.Empty(Pending([ab.Key, a2c.Key], Inputs(Raw("old.db", ab, Nv(ab), culled, Nv(culled)), true)));   // a key file from before: its records' keys
     }
 
     /// <summary>The NVAPI state counted is the one replayed: the last 'N' of the recordings' union (Community.Union), which

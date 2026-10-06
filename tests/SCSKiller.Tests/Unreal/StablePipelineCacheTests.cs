@@ -14,16 +14,21 @@ public class StablePipelineCacheTests
         var body = new MemoryStream();
         var w = new BinaryWriter(body);
         w.Write(0x5049504543414348UL); w.Write(version); w.Write(0u); w.Write((byte)49); w.Write(new byte[16]);
-        w.Write(0UL); w.Write(0L); // table offset (patched below), last GC time
+        var v17 = version == 17; // UE 4.25: no last GC time, TOCSTART, no shared guid, no last used time
+        w.Write(0UL); // table offset (patched below)
+        if (!v17) w.Write(0L); // last GC time
         var offsets = psos.Select(p => { var o = body.Position; w.Write(p.Type); w.Write(new byte[60]); return o; }).ToList();
         var toc = body.Position;
-        w.Write(0x544F435354415232UL); w.Write((byte)1); w.Write(new byte[16]); w.Write(2u); w.Write(psos.Length);
+        w.Write(v17 ? 0x544F435354415254UL : 0x544F435354415232UL);
+        if (!v17) { w.Write((byte)1); w.Write(new byte[16]); }
+        w.Write(2u); w.Write(psos.Length);
         for (var i = 0; i < psos.Length; i++)
         {
             w.Write(psos[i].Key); w.Write((ulong)offsets[i]); w.Write(64UL); w.Write(new byte[16]); w.Write(new byte[36]);
             w.Write(psos[i].Shaders.Length);
             foreach (var s in psos[i].Shaders) w.Write(s);
-            w.Write(0UL); w.Write((ushort)0); w.Write(0L);
+            w.Write(0UL); w.Write((ushort)0);
+            if (!v17) w.Write(0L);
         }
         w.Write(0x454F462D4D41524BUL);
         var b = body.ToArray();
@@ -44,11 +49,22 @@ public class StablePipelineCacheTests
         Assert.Equal([Hex(4)], psos[2].Shaders);
     }
 
+    /// <summary>UE 4.25 writes version 17 (Returnal).</summary>
+    [Fact]
+    public void ReadsUe425sVersion17()
+    {
+        var psos = StablePipelineCache.Read(File(17, (7, 1, [H(1), H(2)]), (8, 0, [H(3)])))!;
+        Assert.Equal([7u, 8u], psos.Select(p => p.Key));
+        Assert.Equal([StablePipelineCache.PsoType.Graphics, StablePipelineCache.PsoType.Compute], psos.Select(p => p.Type));
+        Assert.Equal([Hex(1), Hex(2)], psos[0].Shaders);
+    }
+
     [Fact]
     public void RefusesOtherVersionsAndBrokenFiles()
     {
         Assert.NotNull(StablePipelineCache.Read(File(22, (1, 1, [H(1)]))));
         Assert.Null(StablePipelineCache.Read(File(21, (1, 1, [H(1)]))));
+        Assert.Null(StablePipelineCache.Read(File(16, (1, 1, [H(1)]))));
         Assert.Null(StablePipelineCache.Read(File(29, (1, 1, [H(1)]))));
         var f = File(28, (1, 1, [H(1)]));
         Assert.Null(StablePipelineCache.Read(f.AsSpan(0, f.Length - 1)));

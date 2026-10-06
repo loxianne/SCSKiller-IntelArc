@@ -51,9 +51,11 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "ledger_key.h"
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "dxguid.lib")  // CLSID_D3D12DeviceFactory, CLSID_D3D12SDKConfiguration
@@ -126,7 +128,29 @@ static uint64_t g_db_bytes, g_db_cap;  // scskiller.db's size; max_db_bytes
 static bool g_db_capped, g_db_full;
 
 static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_t0).count(); }
+// The stuck limits' clock: now_ms() without the time the process spent suspended (a paused warm). Only the running
+// supervisor adds to it (D3D11's starts after D3D12's ends): a gap of over 5 s between its passes (50-100 ms apart) is
+// a suspension, and counting it would wake every item in flight stuck for the pause's length.
+static std::atomic<double> g_frozen_ms;
+static double live_ms() { return now_ms() - g_frozen_ms; }
+// A stamp later than a pass's now was made after a resume, before the pass counted the gap: it carries the pause, so
+// the item counts from that now, or a hang in it would be found the pause's length late.
+static double started(std::atomic<double>& since, double now) {
+    double t = since;
+    return t > now && since.compare_exchange_strong(t, now) ? now : t;
+}
+static double live_pass(double& last) {
+    double now = now_ms();
+    if (now - last > 5000) g_frozen_ms = g_frozen_ms + (now - last);
+    last = now;
+    return now - g_frozen_ms;
+}
 static long long unix_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+// An environment variable into v; false when unset, empty or too long for v (the call then leaves v unwritten).
+template <size_t N> static bool env(const wchar_t* name, wchar_t (&v)[N]) {
+    DWORD n = GetEnvironmentVariableW(name, v, N);
+    return n && n < N;
+}
 static std::wstring exe_name() {
     wchar_t p[MAX_PATH];
     GetModuleFileNameW(nullptr, p, MAX_PATH);
@@ -164,6 +188,7 @@ void logf(const char* fmt, ...) {  // also used by warm11.cpp
 //    this dll doesn't);
 //  - no anti-cheat marker in this folder: the built-in list, plus scskiller.ini markers= (it only adds; malformed: no);
 //    an attestation bound to this process (pid= and pid_time=, below) drops EasyAntiCheat's names from that list;
+//  - no "Riot Games" folder in the exe's path;
 //  - no anti-cheat client module loaded.
 // pid= and pid_time= (its creation FILETIME, UTC) bind the attestation to the one process the app started suspended
 // itself, without EasyAntiCheat, for an offline session: in both files, equal, and this process's. Any other launch
@@ -179,17 +204,34 @@ static const wchar_t* const kAntiCheatMarkers[] = {  // GameFiles.Markers; "*x":
     L"EasyAntiCheat", L"EasyAntiCheat_EOS", L"start_protected_game.exe", L"EasyAntiCheat_EOS_Setup.exe", L"EasyAntiCheat_Setup.exe",
     L"BattlEye", L"BEService.exe", L"BEService_x64.exe", L"BELauncher.exe", L"BEClient_x64.dll", L"BEClient.dll",
     L"EAAntiCheat.Installer.exe", L"GameGuard", L"XIGNCODE", L"nProtect", L"randgrid.sys", L"NCGuardSDK", L"NCGuard", L"AntiCheatExpert",
-    L"AceAntibotClient", L"TP3Helper.exe", L"HoYoKProtect.sys", L"mhypbase.dll", L"mhyprot2.sys", L"mhyprot3.sys",
-    L"ACE-BASE.sys", L"NeacClient.exe", L"NeacSafe64.sys", L"NeacSafe64_ex.sys",
+    L"AceAntibotClient", L"TP3Helper.exe", L"SGuard", L"SGuard64.exe", L"SGuardSvc64.exe", L"ACE-Base64.dll", L"ACE-Base.dat",
+    L"ACE-Setup64.exe", L"ACE-Service64.exe", L"ACE-ATS64.dll", L"ACE-CSI64.dll", L"ACE-DFS64.dll", L"TenProtect", L"TesSafe.sys",
+    L"HoYoKProtect.sys", L"mhypbase.dll", L"mhyprot.sys", L"mhyprot2.sys", L"mhyprot3.sys", L"ACE-BASE.sys",
+    L"GenshinImpact.exe", L"YuanShen.exe", L"StarRail.exe", L"ZenlessZoneZero.exe", L"BH3.exe", L"HYP.exe", L"HYPHelper.exe",
+    L"HYPWorker.exe", L"EAAntiCheat.GameServiceLauncher.exe", L"EAAntiCheat.GameServiceLauncher.dll", L"vgk.sys", L"vgc.exe",
+    L"VALORANT.exe", L"VALORANT-Win64-Shipping.exe", L"League of Legends.exe", L"LeagueClient.exe", L"LeagueClientUx.exe",
+    L"LeagueClientUxRender.exe", L"LoR.exe", L"Lion-Win64-Shipping.exe", L"RiotClientServices.exe", L"RiotClientUx.exe",
+    L"RiotClientUxRender.exe",
+    L"NeacClient.exe", L"NeacSafe64.sys", L"NeacSafe64_ex.sys",
     L"BlackCall.aes", L"BlackCall64.aes", L"BlackCat64.sys", L"HShield", L"PunkBuster", L"PnkBstrA.exe", L"pbsvc.exe", L"pbsv.dll",
     L"equ8_conf.json", L"Warframe.x64.exe", L"gameguard.des", L"DenuvoAC", L"denuvo-anti-cheat.sys", L"denuvo-anti-cheat-runtime.dll",
     L"denuvo-anti-cheat-update-service.exe", L"Denuvo Anti-Cheat Installer.exe", L"*.xem", L"*_BE.exe"};
 static const size_t kEasyAntiCheatMarkers = 5;  // the list's first entries
 static std::atomic<int> g_admission;  // 0 undecided, 1 records, -1 pass-through
 static bool anti_cheat_loaded() {
-    for (auto m : {L"EasyAntiCheat_x64.dll", L"EasyAntiCheat_EOS.dll", L"BEClient_x64.dll", L"BEClient.dll"})
+    for (auto m : {L"EasyAntiCheat_x64.dll", L"EasyAntiCheat_EOS.dll", L"BEClient_x64.dll", L"BEClient.dll", L"mhypbase.dll"})
         if (GetModuleHandleW(m)) return true;
     return false;
+}
+// The exe's path has a "Riot Games" folder (GameFiles.RiotGames): the Riot Client installs every Riot title under one.
+static bool riot_games() {
+    std::wstring exe(32768, L'\0');
+    DWORD n = GetModuleFileNameW(nullptr, exe.data(), (DWORD)exe.size());
+    if (!n || n >= exe.size()) return true;
+    exe.resize(n);
+    for (auto& c : exe)
+        if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+    return exe.find(L"\\riot games\\") != std::wstring::npos;
 }
 static bool is_marker(const wchar_t* name, const std::vector<std::wstring>& markers) {
     size_t n = wcslen(name);
@@ -238,24 +280,20 @@ static std::string small_file(const std::wstring& path) {
     s.resize(n);
     return s;
 }
-// The app's ledger entry for this process's exe: %LOCALAPPDATA%\SCSKiller\armed\<SHA-1 of the exe's full path, UTF-16LE,
-// A-Z lowered, in hex>. The app writes it with the nonce it puts in scskiller.armed and deletes it first when it disarms:
-// its own folder, which nothing in the game holds open. "" when the folder or the exe path can't be had.
+// The app's ledger entry for this process's exe: %LOCALAPPDATA%\SCSKiller\armed\<the first of ledger_keys>. The app writes
+// it with the nonce it puts in scskiller.armed and deletes it first when it disarms: its own folder, which nothing in the
+// game holds open. "" when the folder or the exe path can't be had.
 static std::wstring ledger_path() {
     std::wstring exe(32768, L'\0');
     DWORD n = GetModuleFileNameW(nullptr, exe.data(), (DWORD)exe.size());
     if (!n || n >= exe.size()) return L"";
     exe.resize(n);
-    for (auto& c : exe)
-        if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+    const std::wstring key = ledger_keys(exe).front();
     PWSTR local = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) return CoTaskMemFree(local), L"";
+    if (key.empty() || FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) return CoTaskMemFree(local), L"";
     std::wstring dir = local;
     CoTaskMemFree(local);
-    Hash h = sha1(exe.data(), exe.size() * sizeof(wchar_t));
-    wchar_t hex[41] = {};
-    for (int i = 0; i < 20; ++i) swprintf(hex + 2 * i, 3, L"%02x", h[i]);
-    return dir + L"\\SCSKiller\\armed\\" + hex;
+    return dir + L"\\SCSKiller\\armed\\" + key;
 }
 // Both attestations as they are now: scskiller.armed and the ledger entry.
 static std::string armed_text() {
@@ -337,8 +375,16 @@ static bool admitted() {
         bool bound;
         const char* why = !armed(bound) ? "not armed" : !anti_cheat_markers(markers) ? "markers= malformed" : nullptr;
         if (!why && bound) markers.erase(markers.begin(), markers.begin() + kEasyAntiCheatMarkers);  // the app started this process without EasyAntiCheat
+        if (!why && riot_games()) why = "Riot Games install";
         if (!why) why = anti_cheat_beside(markers) ? "anti-cheat next to the exe" : anti_cheat_loaded() ? "anti-cheat client loaded" : nullptr;
-        if (wchar_t ms[16]; !why && GetEnvironmentVariableW(L"SCSKILLER_TEST_ADMIT_PAUSE_MS", ms, 16)) Sleep(_wtoi(ms));  // tests: a change in between
+        // tests: a change in between. SCSKILLER_TEST_ADMIT_GATE=<name>: sets the event <name>.checked, waits for <name>.go.
+        // Only in a process exporting SCSKiller_WarmHost (selftest), never a game.
+        if (wchar_t gate[64]; !why && GetProcAddress(GetModuleHandleW(nullptr), "SCSKiller_WarmHost") && env(L"SCSKILLER_TEST_ADMIT_GATE", gate)) {
+            HANDLE checked = OpenEventW(EVENT_MODIFY_STATE, FALSE, (gate + std::wstring(L".checked")).c_str());
+            HANDLE go = OpenEventW(SYNCHRONIZE, FALSE, (gate + std::wstring(L".go")).c_str());
+            if (checked) SetEvent(checked), CloseHandle(checked);
+            if (go) WaitForSingleObject(go, 60000), CloseHandle(go);
+        }
         if (!why && armed_text() != attested) why = "disarmed while deciding";  // the app disarmed it meanwhile (an install change)
         {
             std::lock_guard l(g_early_mx);
@@ -1577,12 +1623,14 @@ struct Worker11 {
 };
 
 static size_t g_hang11 = SIZE_MAX;  // tests (SCSKILLER_TEST_HANG11): this item's call never returns, like a hung driver
+static DWORD g_hold11 = INFINITE;   // or returns after this many ms
+static int g_hold11_wall;           // ... of wall time (a suspension counts), and then the next item's call never returns
 
 static void worker11(Worker11& w, std::atomic<size_t>& next, size_t n, bool debug) {
     static const char* names[] = {"?", "VS", "PS", "DS", "HS", "GS", "CS", "HS+DS"};
     const size_t batch = 16;
     SetThreadPriority(GetCurrentThread(), g_prio);
-    w.busy = now_ms();
+    w.busy = live_ms();
     Dev11* d = warm11_open(g_warm_dev->GetAdapterLuid(), debug);
     w.busy = 0;
     if (!d) { g_warm_faults = 3; w.finished = true; return; }
@@ -1601,8 +1649,9 @@ static void worker11(Worker11& w, std::atomic<size_t>& next, size_t n, bool debu
             if (pair) stage = 7, memcpy(h.data(), it.data(), 20), memcpy(h2.data(), it.data() + 20, 20);
             auto b = g_blob_bytes.find(h), b2 = pair ? g_blob_bytes.find(h2) : g_blob_bytes.end();
             const char* why = it.size() != 24 && !pair ? "malformed item" : b == g_blob_bytes.end() || (pair && b2 == g_blob_bytes.end()) ? "missing blob" : "";
-            w.at = k, w.busy = now_ms();
-            if (k == g_hang11) Sleep(INFINITE);
+            w.at = k, w.busy = live_ms();
+            if (k == g_hang11 && g_hold11_wall) for (ULONGLONG end = GetTickCount64() + g_hold11; GetTickCount64() < end;) Sleep(1);
+            else if (k == g_hang11 || (g_hold11_wall && k == g_hang11 + 1)) Sleep(k == g_hang11 ? g_hold11 : INFINITE);
             bool good = !*why && item11_guarded(d, stage, &b->second, pair ? &b2->second : nullptr, &why);
             w.busy = 0;
             if (w.claimed) return;  // abandoned while stuck in that call: touch nothing shared, leak the device
@@ -1610,7 +1659,7 @@ static void worker11(Worker11& w, std::atomic<size_t>& next, size_t n, bool debu
             (good ? ok : bad)++;
             w.tally[std::string(names[stage < 8 ? stage : 0]) + (good ? " ok" : std::string(" failed: ") + why)]++;
         }
-        w.at = w.end.load(), w.busy = now_ms();
+        w.at = w.end.load(), w.busy = live_ms();
         HRESULT hr = warm11_flush(d);
         w.busy = 0;
         if (w.claimed.exchange(true)) return;
@@ -1618,7 +1667,7 @@ static void worker11(Worker11& w, std::atomic<size_t>& next, size_t n, bool debu
             logf("warm11: D3D11 device lost (0x%08x) on items %zu-%zu; recreating it", (unsigned)hr, j, w.end - 1);
             g_warm_fail += w.end - j - other, g_warm_other += other;
             w.tally["batch failed: device lost"] += w.end - j - other;
-            w.j = w.end = w.at = 0, w.claimed = false, w.busy = now_ms();  // no batch: a hang in here abandons nothing twice
+            w.j = w.end = w.at = 0, w.claimed = false, w.busy = live_ms();  // no batch: a hang in here abandons nothing twice
             warm11_close(d);
             d = warm11_open(g_warm_dev->GetAdapterLuid(), debug);
             w.busy = 0;
@@ -1645,7 +1694,7 @@ static void warm11_main(size_t first) {
     // One call (a create + draw, or the flush of a batch of 16) taking this long is a hang, not a slow compile.
     double stuck_ms = 60000, stuck_stop_ms = 2000;  // ponytail: fixed limits, measure the slowest real batch if they bite
     wchar_t test[64];
-    if (GetEnvironmentVariableW(L"SCSKILLER_TEST_HANG11", test, 64)) swscanf_s(test, L"%zu,%lf", &g_hang11, &stuck_ms);  // "<item>,<limit ms>"
+    if (env(L"SCSKILLER_TEST_HANG11", test)) swscanf_s(test, L"%zu,%lf,%lu,%d", &g_hang11, &stuck_ms, &g_hold11, &g_hold11_wall);  // "<item>,<limit ms>[,<hold ms>[,1]]"
     auto next = new std::atomic<size_t>(first);  // leaked with the workers if one is abandoned
     std::vector<Worker11*> ws;
     std::map<std::string, uint64_t> tally;
@@ -1653,11 +1702,13 @@ static void warm11_main(size_t first) {
     auto spawn = [&] { auto w = new Worker11; w->t = std::thread(worker11, std::ref(*w), std::ref(*next), n, debug); ws.push_back(w); };
     for (int i = 0; i < threads; ++i) spawn();
     int replaced = 0;
+    double pass = now_ms();
     while (!ws.empty()) {
         Sleep(50);
+        double now = live_pass(pass);
         for (size_t i = 0; i < ws.size();) {
             Worker11* w = ws[i];
-            double since = w->busy, now = now_ms();
+            double since = started(w->busy, now);
             if (w->finished) {
                 w->t.join();
                 for (auto& [k, c] : w->tally) tally[k] += c;
@@ -1701,13 +1752,18 @@ static void warm_main() {
     auto t0 = now_ms();
     logf("warm: compiling %zu recorded + %zu generated PSOs + %zu D3D11 shaders from item %zu on %d threads", nrec, g_plan.size(),
          g_items11.size(), first, g_threads);
+    wchar_t core[MAX_PATH] = L"none";
+    HMODULE cm = GetModuleHandleW(L"D3D12Core.dll");
+    auto sdk = cm ? (const UINT*)GetProcAddress(cm, "D3D12SDKVersion") : nullptr;
+    if (cm) GetModuleFileNameW(cm, core, MAX_PATH);
+    logf("warm: D3D12 runtime %ls (SDK %u)", core, sdk ? *sdk : 0);
     // SCSKILLER_WARM_TIMES=1 (development): stage\scskiller_warm_times.csv, "item,ms,ok" per PSO (A/B tests of what a warm leaves cached)
     FILE* times = GetEnvironmentVariableW(L"SCSKILLER_WARM_TIMES", nullptr, 0) ? _wfopen((g_dir + L"scskiller_warm_times.csv").c_str(), L"w") : nullptr;
     wchar_t rt[8] = {};
-    if (GetEnvironmentVariableW(L"SCSKILLER_WARM_ROUNDTRIP", rt, 8)) g_roundtrip = wcscmp(rt, L"only") ? 1 : 2;
-    wchar_t env[16] = {};
+    if (env(L"SCSKILLER_WARM_ROUNDTRIP", rt)) g_roundtrip = wcscmp(rt, L"only") ? 1 : 2;
+    wchar_t park[16] = {};
     if (g_mem_mb) g_park_mb = std::max<uint32_t>(256, g_mem_mb / 4);
-    if (GetEnvironmentVariableW(L"SCSKILLER_WARM_RT_PARK_MB", env, 16)) g_park_mb = _wtoi(env);
+    if (env(L"SCSKILLER_WARM_RT_PARK_MB", park)) g_park_mb = _wtoi(park);
     g_allowed = g_threads;
     if (g_mem_mb && private_mb() > g_mem_mb)  // the dbs' records alone are over it: start with one worker
         g_allowed = 1, logf("warm: private memory %.0f MB over the %u MB budget at the start: 1 worker", private_mb(), g_mem_mb);
@@ -1729,8 +1785,8 @@ static void warm_main() {
         logf("warm: %zu items skipped: they removed the device in an earlier run", g_crash.size());
     }
     wchar_t fault[32] = {};  // SCSKILLER_WARM_FAULT=<item>:<av|hang> (development): see so_call
-    if (GetEnvironmentVariableW(L"SCSKILLER_WARM_FAULT", fault, 32)) g_fault_item = _wtoi64(fault), g_fault_kind = wcsstr(fault, L"hang") ? 2 : 1;
-    if (GetEnvironmentVariableW(L"SCSKILLER_WARM_REMOVE", fault, 32)) g_remove_item = _wtoi64(fault);
+    if (env(L"SCSKILLER_WARM_FAULT", fault)) g_fault_item = _wtoi64(fault), g_fault_kind = wcsstr(fault, L"hang") ? 2 : 1;
+    if (env(L"SCSKILLER_WARM_REMOVE", fault)) g_remove_item = _wtoi64(fault);
     // In flight when an earlier process's device was removed: each alone, before the workers, so a removal names its item.
     // ponytail: no supervisor over these few; a create that hangs here stalls the run like a hung driver does anywhere
     size_t blamed_alone = SIZE_MAX, alone_at = 0;
@@ -1746,7 +1802,7 @@ static void warm_main() {
     }
     if (blamed_alone != SIZE_MAX) logf("warm: item %zu removed the device alone: later runs skip it", blamed_alone);
     wchar_t stuck_env[16] = {};  // SCSKILLER_WARM_STUCK_S (development): the per-item limit, default 60 s
-    double stuck_ms = GetEnvironmentVariableW(L"SCSKILLER_WARM_STUCK_S", stuck_env, 16) ? 1000.0 * _wtoi(stuck_env) : 60000, stuck_stop_ms = 2000;
+    double stuck_ms = env(L"SCSKILLER_WARM_STUCK_S", stuck_env) ? 1000.0 * _wtoi(stuck_env) : 60000, stuck_stop_ms = 2000;
 
     // Workers take items in file order. A supervisor (this thread) abandons a worker stuck in one item for over stuck_ms (2 s
     // once stopping), as warm11 does: the item counts as failed, a stuck state object stops the ray tracing phase (rt_stop),
@@ -1773,7 +1829,7 @@ static void warm_main() {
                 if ((j = next++) >= n12) { --g_active; break; }
                 if (other_pass(j)) { --g_active, g_item_state[j] = 1, ++g_warm_other; continue; }
                 w->claimed = false, w->j = j;
-                double t = now_ms();
+                double t = live_ms();
                 w->since = t;
                 bool crash = g_crash.count(j);
                 int ok = crash ? 1 : g_item_state[j] ? 2 - g_item_state[j] : replay_guarded(j, nrec);  // created alone: its outcome
@@ -1783,7 +1839,7 @@ static void warm_main() {
                 g_item_state[j] = ok > 0 ? 1 : ok == 0 ? 2 : ok == -2 ? 4 : 3;
                 if (crash) g_warm_crash++;
                 else if (ok >= 0) (ok ? g_warm_ok : g_warm_fail)++;
-                if (times) { std::lock_guard l(tmx); fprintf(times, "%zu,%.3f,%d\n", j, now_ms() - t, ok); }
+                if (times) { std::lock_guard l(tmx); fprintf(times, "%zu,%.3f,%d\n", j, live_ms() - t, ok); }
             }
             w->finished = true;
         });
@@ -1791,11 +1847,12 @@ static void warm_main() {
     };
     for (int i = 0; i < g_threads && blamed_alone == SIZE_MAX; ++i) spawn();
     int replaced = 0;
+    double pass = now_ms();
     auto supervise = [&] {
-        double now = now_ms();
+        double now = live_pass(pass);
         for (size_t i = 0; i < ws.size();) {
             Worker12* w = ws[i];
-            double since = w->since;
+            double since = started(w->since, now);
             if (w->finished) {
                 w->t.join();
                 delete w;
@@ -1875,7 +1932,7 @@ static void warm_main() {
                 ++g_allowed, mem_changed = now, logf("warm: private memory %.0f MB, under the %u MB budget again: %d workers", mb, g_mem_mb, g_allowed.load());
         }
         if (d12done && (first + warm_done() >= n || g_warm_faults >= 3 || g_state == STOP || n == n12 || g_retry_from != SIZE_MAX)) break;
-        double now = now_ms(), done = double(first + warm_done());
+        double now = live_ms(), done = double(first + warm_done());
         if (done != moved_done) moved_done = done, moved_t = now;
         if (tick % 50) continue;
         double rate = (done - last_done) * 1000 / (now - last_t);
@@ -2376,7 +2433,10 @@ static std::atomic<int64_t> g_hook_ticks, g_hook_max;  // the hooks' own QPC tic
 static std::atomic<uint64_t> g_presents;
 static thread_local int t_present;  // nesting depth: only the outermost present of a thread is a frame
 
+static std::atomic<bool> g_frames_off;  // frame generation made its swap chain (frames_fg)
+
 template <class F> static HRESULT timed_present(void* sc, UINT flags, F&& call) {
+    if (g_frames_off) return call();
     LARGE_INTEGER a, b, c, t;
     QueryPerformanceCounter(&a);
     if (t_present++ || (flags & DXGI_PRESENT_TEST)) {
@@ -2428,31 +2488,92 @@ static void sc_patch(void** vt, int slot, void* hook, std::atomic<void*> ScVt::*
     VirtualProtect(&vt[slot], sizeof(void*), old, &old);
     logf("frames: swap chain vtable %p slot %d hooked", (void*)vt, slot);
 }
+// With frame generation's swap chain, Steam's overlay and our Present hook call each other until the stack overflows (FSR 3
+// frame generation, the overlay on): no Present hook once frame generation makes its swap chain. FSR 3 (also under
+// OptiScaler and dlssg-to-fsr3) and XeSS frame generation make it on a present queue they name before the create.
+static bool fg_queue(IUnknown* dev, std::wstring& name) {
+    ID3D12CommandQueue* q;
+    if (!dev || FAILED(dev->QueryInterface(IID_PPV_ARGS(&q)))) return false;
+    wchar_t n[128] = {};
+    UINT size = sizeof n - sizeof(wchar_t);
+    if (FAILED(q->GetPrivateData(WKPDID_D3DDebugObjectNameW, &size, n))) size = 0;
+    q->Release();
+    name.assign(n, size / sizeof(wchar_t));
+    for (auto p : {L"AMD FSR PresentQueue", L"XefgInterpolationSwapChain::present_queue_"})
+        if (!name.compare(0, wcslen(p), p)) return true;
+    return false;
+}
+// OptiScaler.ini beside the exe with its frame generation on: it may make its swap chain through a factory the recorder
+// doesn't hook (OptiScaler as dxgi.dll). [FrameGen] Enabled (default false) with an FGOutput (default nofg); in older
+// versions FGType (default optifg) with [OptiFG] Enabled (default false), or nukems (on with the game's DLSS-G).
+static bool opti_fg() {
+    const std::wstring ini = g_dir + L"OptiScaler.ini";
+    auto is = [&](const wchar_t* section, const wchar_t* key, const wchar_t* value) {
+        wchar_t v[32];
+        GetPrivateProfileStringW(section, key, L"auto", v, 32, ini.c_str());
+        return !_wcsicmp(v, value);
+    };
+    wchar_t out[32];
+    if (GetPrivateProfileStringW(L"FrameGen", L"FGOutput", L"", out, 32, ini.c_str()))
+        return is(L"FrameGen", L"Enabled", L"true") && _wcsicmp(out, L"auto") && _wcsicmp(out, L"nofg");
+    if (is(L"FrameGen", L"FGType", L"nofg")) return false;
+    return is(L"FrameGen", L"FGType", L"nukems") || is(L"OptiFG", L"Enabled", L"true");
+}
+// The originals go back before frame generation's swap chain is made, so no hook installed on it can take ours as its
+// original; g_frames_off is set only after, under g_mx, which hook_swapchain checks under it. A slot another hook took
+// after ours (even meanwhile: compare-exchange) stays as it is.
+static void frames_fg(IUnknown* dev) {
+    if (g_frames_off) return;
+    std::wstring name;
+    bool fg = fg_queue(dev, name);
+    logf("frames: a swap chain on queue \"%ls\"%s", name.c_str(), fg ? ": frame generation's" : "");
+    if (!fg) return;
+    std::lock_guard l(g_mx);
+    if (g_frames_off) return;
+    logf("frames: off (frame generation swap chain)");
+    for (int i = 0, n = g_nscvt; i < n; ++i)
+        for (auto [slot, hook, orig] : {std::tuple{SLOT_PRESENT, (void*)hk_present, &ScVt::present}, std::tuple{SLOT_PRESENT1, (void*)hk_present1, &ScVt::present1}}) {
+            void** vt = g_scvt[i].vt;
+            void* o = g_scvt[i].*orig;
+            if (!o) continue;
+            DWORD old;
+            VirtualProtect(&vt[slot], sizeof(void*), PAGE_READWRITE, &old);
+            void* was = InterlockedCompareExchangePointer(&vt[slot], o, hook);
+            VirtualProtect(&vt[slot], sizeof(void*), old, &old);
+            if (was != hook) logf("frames: swap chain vtable %p slot %d is another hook's, left as it is", (void*)vt, slot);
+        }
+    g_frames_off = true;
+}
 static void hook_swapchain(HRESULT hr, void* p) {
     if (FAILED(hr) || !p) return;
     std::lock_guard l(g_mx);
+    if (g_frames_off) return;
     IDXGISwapChain* sc;
     IDXGISwapChain1* sc1;
     if (SUCCEEDED(((IUnknown*)p)->QueryInterface(IID_PPV_ARGS(&sc)))) sc_patch(*(void***)sc, SLOT_PRESENT, (void*)hk_present, &ScVt::present), sc->Release();
     if (SUCCEEDED(((IUnknown*)p)->QueryInterface(IID_PPV_ARGS(&sc1)))) sc_patch(*(void***)sc1, SLOT_PRESENT1, (void*)hk_present1, &ScVt::present1), sc1->Release();
 }
 static HRESULT STDMETHODCALLTYPE hk_createsc(IDXGIFactory* f, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* d, IDXGISwapChain** pp) {
+    frames_fg(dev);
     HRESULT hr = o_createsc(f, dev, d, pp);
     hook_swapchain(hr, pp ? *pp : nullptr);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE hk_createsc_hwnd(IDXGIFactory2* f, IUnknown* dev, HWND w, const DXGI_SWAP_CHAIN_DESC1* d,
                                                   const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* o, IDXGISwapChain1** pp) {
+    frames_fg(dev);
     HRESULT hr = o_createsc_hwnd(f, dev, w, d, fs, o, pp);
     hook_swapchain(hr, pp ? *pp : nullptr);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE hk_createsc_cw(IDXGIFactory2* f, IUnknown* dev, IUnknown* w, const DXGI_SWAP_CHAIN_DESC1* d, IDXGIOutput* o, IDXGISwapChain1** pp) {
+    frames_fg(dev);
     HRESULT hr = o_createsc_cw(f, dev, w, d, o, pp);
     hook_swapchain(hr, pp ? *pp : nullptr);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE hk_createsc_comp(IDXGIFactory2* f, IUnknown* dev, const DXGI_SWAP_CHAIN_DESC1* d, IDXGIOutput* o, IDXGISwapChain1** pp) {
+    frames_fg(dev);
     HRESULT hr = o_createsc_comp(f, dev, d, o, pp);
     hook_swapchain(hr, pp ? *pp : nullptr);
     return hr;
@@ -2529,6 +2650,7 @@ static void frame_hooks() {
     wchar_t on[8];  // not cfg(): a staged warm child may inherit SCSKILLER_* variables
     GetPrivateProfileStringW(L"scskiller", L"frames", L"1", on, 8, (g_dir + L"scskiller.ini").c_str());
     if (!wcscmp(on, L"0")) return logf("frames: off (scskiller.ini frames=0)");
+    if (opti_fg()) return logf("frames: off (OptiScaler.ini has frame generation on)");
     // the dxgi.dll the game uses: a mod's in the game folder, if one is loaded by that name
     HMODULE m = GetModuleHandleW(L"dxgi.dll");
     if (!m) m = LoadLibraryW(L"dxgi.dll");
@@ -2791,9 +2913,9 @@ extern "C" void WINAPI SCSKiller_Stats(uint64_t out[7]) {
     memcpy(out, v, sizeof v);
 }
 
-static std::wstring cfg(const wchar_t* env, const wchar_t* key, const wchar_t* def) {
+static std::wstring cfg(const wchar_t* var, const wchar_t* key, const wchar_t* def) {
     wchar_t v[64];
-    if (GetEnvironmentVariableW(env, v, 64)) return v;
+    if (env(var, v)) return v;
     GetPrivateProfileStringW(L"scskiller", key, def, v, 64, (g_dir + L"scskiller.ini").c_str());
     return v;
 }
@@ -2811,6 +2933,36 @@ static void write_end_marker() {
     WriteFile(g_csv_h, b, DWORD(e + 2 - b), &n, &at);
 }
 
+// The folder of a module's path as the loader reports it, with the trailing backslash.
+static std::wstring module_dir(HMODULE m) {
+    wchar_t p[MAX_PATH];
+    std::wstring s(p, GetModuleFileNameW(m, p, MAX_PATH));
+    return s.substr(0, s.find_last_of(L"\\/") + 1);
+}
+static bool same_file(const std::wstring& a, const std::wstring& b) {
+    FILE_ID_INFO id[2];
+    for (int i = 0; i < 2; ++i) {
+        HANDLE h = CreateFileW((i ? b : a).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        BOOL ok = GetFileInformationByHandleEx(h, FileIdInfo, &id[i], sizeof id[i]);
+        CloseHandle(h);
+        if (!ok) return false;
+    }
+    return !memcmp(&id[0], &id[1], sizeof id[0]);
+}
+// This dll's folder. The loader's path can be rewritten in user mode: REFramework points every dll in the exe's folder at a
+// copy under <folder>\_storage_ (where no scskiller.armed is). The kernel's name of the mapped image can't be, so the exe's
+// folder is taken when the image really is that folder's file, else the reported one.
+static std::wstring own_dir(HMODULE self) {
+    std::wstring dir = module_dir(self), exe_dir = module_dir(nullptr);
+    if (!_wcsicmp(dir.c_str(), exe_dir.c_str())) return dir;
+    std::wstring mapped(32768, L'\0');  // an NT path (\Device\HarddiskVolumeN\...), not bounded by MAX_PATH
+    DWORD n = K32GetMappedFileNameW(GetCurrentProcess(), self, mapped.data(), (DWORD)mapped.size());
+    if (!n || n >= mapped.size() - 1) return dir;
+    mapped.resize(n);
+    return same_file(L"\\\\?\\GLOBALROOT" + mapped, exe_dir + mapped.substr(mapped.find_last_of(L'\\') + 1)) ? exe_dir : dir;
+}
+
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_DETACH) {
         // reserved != nullptr: the process is terminating (not a plain FreeLibrary). Best effort, no lock: the loader lock
@@ -2820,10 +2972,8 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved) {
     }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(self);
+    g_dir = own_dir(self);
     wchar_t p[MAX_PATH];
-    GetModuleFileNameW(self, p, MAX_PATH);
-    g_dir = p;
-    g_dir.resize(g_dir.find_last_of(L"\\/") + 1);
     GetSystemDirectoryW(p, MAX_PATH);
     g_real = LoadLibraryW((std::wstring(p) + L"\\d3d12.dll").c_str());
     if (!g_real) return FALSE;

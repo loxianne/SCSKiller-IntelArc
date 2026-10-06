@@ -120,6 +120,35 @@ public partial class AppTests
         Assert.Empty(k.Store.LoadGame(_game.Id).RecorderFiles);   // never merged across folders
     }
 
+    /// <summary>VALORANT added by hand from its exe, with no Vanguard file in its folders and a recorder already in: the
+    /// scan finds it anti-cheat, takes every file of ours out and won't put the recorder back.</summary>
+    [Fact]
+    public async Task A_recorder_in_a_riot_game_added_by_hand_comes_out_and_stays_out()
+    {
+        var dir = Directory.CreateDirectory(Path.Combine(_root, "Riot Games", "VALORANT", "live", "ShooterGame", "Binaries", "Win64")).FullName;
+        var exe = Path.Combine(dir, "VALORANT-Win64-Shipping.exe");
+        File.WriteAllBytes(exe, new byte[4096]);
+        var manual = new ManualSource(new AppStore(Path.Combine(_root, "data")));
+        var added = manual.Add(new ManualEntry(exe, dir, "VALORANT", Confirmed: true)).Game;
+        var k = Killer(new FakeReader(Unreal), new UpdatedPlanner(recorded: true), sources: [manual]);
+        k.ManageRecorders = true;
+        File.Copy(_proxy, Path.Combine(dir, "d3d12.dll"));
+        File.WriteAllText(Path.Combine(dir, "scskiller.ini"), "[scskiller] mode=record");
+        foreach (var f in new[] { Recordings.KeysFile, ScsKiller.ArmedFile, "scskiller_creates.csv", "scskiller.log" }) File.WriteAllText(Path.Combine(dir, f), "x");
+        WriteRecording(Path.Combine(dir, "scskiller.db"));
+        var was = k.Store.LoadGame(added.Id);
+        foreach (var f in new[] { "d3d12.dll", "scskiller.ini" }) was.RecorderFiles[f] = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(dir, f))));
+        (was.RecorderExe, was.RecorderInstallDir) = (exe, dir);
+        k.Store.SaveGame(added.Id, was);
+
+        var s = (await k.ScanAsync(default)).Single();
+        Assert.Equal((AntiCheat.Other, ScsKiller.SkipAntiCheat), (s.AntiCheat, s.RecorderSkip));
+        Assert.DoesNotContain(Directory.EnumerateFiles(dir), f => Path.GetFileName(f).StartsWith("scskiller", StringComparison.OrdinalIgnoreCase) || Path.GetFileName(f) == "d3d12.dll");
+        Assert.Empty(k.Store.LoadGame(added.Id).RecorderFiles);
+        Assert.Throws<InvalidOperationException>(() => k.InstallRecorder(added.Id));
+        Assert.False(File.Exists(Path.Combine(dir, "d3d12.dll")));
+    }
+
     [Fact]
     public void The_scan_cache_is_keyed_on_the_exact_build()
     {

@@ -63,6 +63,16 @@ public class MiddlewarePackTests(ITestOutputHelper output)
         return [.. head, .. payload.SelectMany(p => p.Concat(new byte[13]))]; // unaligned, padded like real data
     }
 
+    /// <summary>A minimal PE32+ whose import table names <paramref name="dll"/>.</summary>
+    internal static byte[] PeImporting(string dll)
+    {
+        var pe = Pe(null);
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(0x58 + 120), 0x1000);                // import directory RVA
+        BinaryPrimitives.WriteUInt32LittleEndian(pe.AsSpan(0x200 + 12), 0x1000 + 60);            // its one descriptor's Name RVA
+        Encoding.ASCII.GetBytes(dll).CopyTo(pe, 0x200 + 60);
+        return pe;
+    }
+
     internal static Game GameIn(string dir, string id) => new(id, id, Store.Other, dir, Path.Combine(dir, "game.exe"));
 
     internal static ShaderIndex Index(params string[] shas) =>
@@ -668,5 +678,37 @@ public class MiddlewarePackTests(ITestOutputHelper output)
         File.Delete(Path.Combine(dir, "amdxcffx64.dll"));
         planner.Materialize(plan, second, Engine, new NoShaders(), null, work, default);
         Assert.DoesNotContain(PsoDb.Read(Path.Combine(work, "scskiller_gen.db")), r => r.Tag != 'B');
+    }
+
+    /// <summary>A DLL is read whole once: the next start knows it by its stamp (size, write time, change time, file id, head
+    /// and tail) from the saved scans. A copy over it that keeps its size and write time (an archive's extraction) changes
+    /// its change time and is read again.</summary>
+    [Fact]
+    public void A_dll_is_read_whole_once_and_known_by_its_stamp_at_the_next_start()
+    {
+        var dir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "scskiller-images-" + Guid.NewGuid().ToString("N")[..8])).FullName;
+        try
+        {
+            var dll = Path.Combine(dir, "ffx_fsr2_api_dx12_x64.dll");
+            var bytes = Pe("ffx_fsr2_api_dx12_x64.dll", Container("DXIL", "a"), new byte[20000], Container("DXIL", "b"));
+            File.WriteAllBytes(dll, bytes);
+            var first = Middleware.Scan(dll);
+            var file = Path.Combine(dir, "middleware.json");
+            Middleware.SaveImages(file);
+            Middleware.ForgetScans();   // a new process
+            const string Kept = "0000000000000000000000000000000000000000";
+            File.WriteAllText(file, File.ReadAllText(file).Replace(first.ContentHash, Kept));   // tells the saved scan from a read
+            Middleware.LoadImages(file);
+            Assert.Equal(Kept, Middleware.Scan(dll).ContentHash);   // the saved scan: the file wasn't read whole
+
+            var written = File.GetLastWriteTimeUtc(dll);
+            bytes[bytes.Length / 2] ^= 1;   // in the middle: the stamp's head and tail are the same
+            File.WriteAllBytes(dll, bytes);
+            File.SetLastWriteTimeUtc(dll, written);
+            var again = Middleware.Scan(dll).ContentHash;
+            Assert.NotEqual(Kept, again);
+            Assert.NotEqual(first.ContentHash, again);
+        }
+        finally { Directory.Delete(dir, true); }
     }
 }

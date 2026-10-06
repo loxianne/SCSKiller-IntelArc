@@ -107,6 +107,12 @@ jobs:
       - name: Test
         run: dotnet test tests/SCSKiller.Tests -c Release --no-build --filter "Needs!=Gpu&Needs!=Game"
 
+      # The pinned Oodle DLL needs AVX2 and BMI2; .NET reports neither with this knob, as on a CPU without them
+      - name: Test codecs without AVX2
+        env:
+          DOTNET_EnableAVX2: '0'
+        run: dotnet test tests/SCSKiller.Tests -c Release --no-build --filter "FullyQualifiedName~CodecCpuTests"
+
       # No Oodle DLL in anything that leaves the build (THIRD-PARTY-NOTICES.md); the app downloads it on first use.
       # Nothing is signed here: build/release.ps1 signs these exact bytes after checking them against the sums.
       # A tag build is stamped with the tag's version (publish.ps1 drops the v; a bad tag fails it). Otherwise the dev default.

@@ -12,6 +12,10 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
 {
     public Store Store => Store.Xbox;
 
+    /// <summary>Games listed before, by id: the exe a config names none for is reused while the game's version and folder
+    /// are the same and the exe is there.</summary>
+    public IReadOnlyDictionary<string, Game>? Known { get; set; }
+
     public IReadOnlyList<Game> Discover()
     {
         var games = new List<Game>();
@@ -28,7 +32,7 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
                 if (!File.Exists(configPath)) continue;
                 try
                 {
-                    if (ParseGame(content, configPath) is { } game) games.Add(game);
+                    if (ParseGame(content, configPath, Known) is { } game) games.Add(game);
                 }
                 catch (Exception) { }   // a config we can't read/parse shouldn't take the rest of the scan down
             }
@@ -72,7 +76,7 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
         return paths;
     }
 
-    static Game? ParseGame(string content, string configPath)
+    static Game? ParseGame(string content, string configPath, IReadOnlyDictionary<string, Game>? known = null)
     {
         var doc = XDocument.Load(configPath);
         var ns = doc.Root!.GetDefaultNamespace();
@@ -85,15 +89,16 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
         if (doc.Root.Element(ns + "AllowedProducts") != null) return null;
         var display = doc.Root.Element(ns + "ShellVisuals")?.Attribute("DefaultDisplayName")?.Value ?? name;
 
+        var familyName = publisher != null ? PackageFamilyName(name, publisher) : null;
         var exeRel = doc.Root.Element(ns + "ExecutableList")?.Elements(ns + "Executable")
             .Where(IsGameExecutable)
             .Select(e => e.Attribute("Name")?.Value)
             .FirstOrDefault(n => n != null)
-            ?? FindExeFallback(content);
+            ?? (known?.GetValueOrDefault($"xbox:{familyName ?? name}") is { Version: { } was } k && was == version && k.InstallDir.Equals(content, StringComparison.OrdinalIgnoreCase)
+                && File.Exists(k.ExePath) ? k.ExePath : FindExeFallback(content));
         if (exeRel == null) return null;
         var exe = Path.GetFullPath(Path.Combine(content, exeRel));
 
-        var familyName = publisher != null ? PackageFamilyName(name, publisher) : null;
         // e.g. Minecraft Launcher. Name-based because nothing else says it: neither MicrosoftGame.config nor
         // appxmanifest.xml has an app type or category (checked on 37 installed titles: the launcher's elements and
         // attributes are the same set the games use), and the GamingServices registry only mirrors the config.
@@ -122,7 +127,7 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
     {
         var opts = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 3, IgnoreInaccessible = true };
         return Directory.EnumerateFiles(content, "*.exe", opts)
-            .Where(f => !HelperHints.Any(h => Path.GetFileName(f).Contains(h, StringComparison.OrdinalIgnoreCase)))
+            .Where(f => !HelperHints.Any(h => Path.GetFileName(f).Contains(h, StringComparison.OrdinalIgnoreCase)) && !GameFiles.IsHelper(f))
             .Select(f => new FileInfo(f)).MaxBy(f => f.Length)?.FullName;
     }
 

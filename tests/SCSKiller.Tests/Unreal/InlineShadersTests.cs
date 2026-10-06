@@ -45,12 +45,15 @@ public class InlineShadersTests(ITestOutputHelper output)
         byte[] symbols = [.. new byte[64]];
         BinaryPrimitives.WriteUInt32BigEndian(symbols, 0xb7756362);
         BinaryPrimitives.WriteUInt64BigEndian(symbols.AsSpan(24), 64); // FCompressedBuffer with no blocks: header only
-        byte[] data =
+        byte[] head =
         [
             .. noise,
             // 'A' (4.25-5.4): one raw entry, one compressed
             .. Anchor(2), .. I32(vs.Length), .. vs, .. I32(vs.Length), 0, .. I32(zps.Length), .. zps, .. I32(ps.Length), 3,
             .. noise,
+        ];
+        byte[] tail =
+        [
             // 'B' (5.5+): header buffer, code buffer, symbols (5.6+)
             .. Anchor(1), .. BitConverter.GetBytes(12L), .. I32(cs.Length), .. I32(cs.Length - 14), 5, 0, 0, 0, .. BitConverter.GetBytes((long)cs.Length), .. cs, .. symbols,
             .. noise,
@@ -58,8 +61,9 @@ public class InlineShadersTests(ITestOutputHelper output)
             .. I32(zps.Length), .. zps,
             .. noise,
         ];
-        var found = InlineShaders.Carve(data, out var undecoded);
-        Assert.Equal(0, undecoded);
+        byte[] data = [.. head, .. tail];
+        var found = new List<InlineShaders.Entry>();
+        Assert.Equal(0, InlineShaders.Carve([data], found.Add));
         Assert.Equal(["A", "A", "B", "Z"], found.Select(e => e.Format.ToString()));
         Assert.Equal([vs, ps, cs, ps], found.Select(e => e.Code));
         Assert.Equal(found[0].Map, found[1].Map);
@@ -67,7 +71,13 @@ public class InlineShadersTests(ITestOutputHelper output)
         Assert.Equal(0, found[3].Map);
         foreach (var e in found) Assert.Equal(e.Code, InlineShaders.Decode(data, e.Offset, e.Format));
         Assert.Equal(new ResourceCounts(1, 2, 0, 1), ShaderContainer.UeCounts(found[1].Code));
-        Assert.Empty(InlineShaders.Carve(noise, out _));
+        var split = new List<InlineShaders.Entry>();
+        InlineShaders.Carve([head, tail], split.Add); // .uasset + .uexp: offsets and maps as in their concatenation
+        Assert.Equal(found.Select(e => (e.Map, e.Offset, e.Format)), split.Select(e => (e.Map, e.Offset, e.Format)));
+        Assert.Equal(found.Select(e => e.Code), split.Select(e => e.Code));
+        var none = new List<InlineShaders.Entry>();
+        InlineShaders.Carve([noise], none.Add);
+        Assert.Empty(none);
     }
 
     static Game? Installed(string name)
@@ -131,7 +141,9 @@ public class InlineShadersTests(ITestOutputHelper output)
         provider.Mount();
         var materials = provider.Files.Values.Where(f => f.Extension == "uasset" && Path.GetFileName(f.Path).StartsWith("M_")).OrderBy(f => f.Path).Take(300).ToList();
         Assert.Equal(300, materials.Count);
-        Assert.All(materials, f => Assert.Empty(InlineShaders.Carve(f.Read(), out _)));
+        var found = new List<InlineShaders.Entry>();
+        foreach (var f in materials) InlineShaders.Carve([f.Read()], found.Add);
+        Assert.Empty(found);
     }
 
     /// <summary>Xbox app games: Windows won't open their exes (encrypted at rest), so the engine comes from the containers
@@ -162,5 +174,96 @@ public class InlineShadersTests(ITestOutputHelper output)
         Assert.NotNull(InlineShaders.Decode([.. I32(ok.Length), .. ok], 0, 'Z'));
         var bomb = Zlib([.. vs, .. new byte[4 << 20]]);   // ~4 KB stored, 4 MB out
         Assert.Null(InlineShaders.Decode([.. I32(bomb.Length), .. bomb], 0, 'Z'));
+    }
+
+    /// <summary>A container whose program runs past its end (here a SHEX customdata token without its length) throws
+    /// IndexOutOfRangeException from the parser: that shader is skipped and counted, the index goes on.</summary>
+    [Fact]
+    public void AMalformedContainerIsSkippedAndCounted()
+    {
+        byte[] shex = [.. I32(0x50), .. I32(3), .. I32(0x35)]; // ps_5_0, 3 tokens, customdata
+        byte[] bad = [.. "DXBC"u8, .. new byte[16], .. I32(1), .. I32(32 + 4 + 8 + shex.Length), .. I32(1), .. I32(36), .. "SHEX"u8, .. I32(shex.Length), .. shex, .. I32(4)];
+        Assert.Throws<IndexOutOfRangeException>(() => ShaderContainer.Parse(bad.AsSpan(0, bad.Length - 4), "", new(0, 0, 0, 0)));
+        var vs = Code("float4 main() : SV_Position { return 0; }", "vs_5_0", 0, 0);
+        static byte[] Package(byte[] code) => [.. Anchor(1), .. I32(code.Length), .. code, .. I32(code.Length), 0]; // one raw 'A' entry
+
+        var install = Ff7.TempDir("inline-malformed");
+        var paks = Directory.CreateDirectory(Path.Combine(install, "Proj", "Content", "Paks")).FullName;
+        Pak(Path.Combine(paks, "Proj-Windows.pak"), ("Proj/Content/M_Bad.uasset", Package(bad)), ("Proj/Content/M_Good.uasset", Package(vs)));
+        using var provider = new CUE4Parse.FileProvider.DefaultFileProvider(paks, SearchOption.TopDirectoryOnly,
+            new CUE4Parse.UE4.Versions.VersionContainer(CUE4Parse.UE4.Versions.EGame.GAME_UE4_27), StringComparer.OrdinalIgnoreCase);
+        provider.Initialize();
+        provider.Mount();
+        var log = new List<string>();
+        var game = new Game("test:malformed", "Malformed", Store.Other, install, "");
+        var index = new UnrealReader(Ff7.TempDir("inline-malformed-data")).IndexInline(provider, game, new Log(log.Add), CancellationToken.None);
+        Assert.Equal([Stage.Vertex], index.Shaders.Values.Select(s => s.Stage));
+        Assert.Contains(", 1 unparseable", Assert.Single(log));
+    }
+
+    /// <summary>A split package (.uasset header, .uexp exports) is carved file by file: the offsets inline.idx keeps are
+    /// into both files as one, and read back the same shader.</summary>
+    [Fact]
+    public void SplitPackagesReadBackFromTheirExports()
+    {
+        var vs = Code("float4 main() : SV_Position { return 0; }", "vs_5_0", 0, 0);
+        var install = Ff7.TempDir("inline-split");
+        var paks = Directory.CreateDirectory(Path.Combine(install, "Proj", "Content", "Paks")).FullName;
+        Pak(Path.Combine(paks, "Proj-Windows.pak"), ("Proj/Content/M_Split.uasset", new byte[2048]),
+            ("Proj/Content/M_Split.uexp", [.. new byte[100], .. Anchor(1), .. I32(vs.Length), .. vs, .. I32(vs.Length), 0]));
+        using var provider = new CUE4Parse.FileProvider.DefaultFileProvider(paks, SearchOption.TopDirectoryOnly,
+            new CUE4Parse.UE4.Versions.VersionContainer(CUE4Parse.UE4.Versions.EGame.GAME_UE4_27), StringComparer.OrdinalIgnoreCase);
+        provider.Initialize();
+        provider.Mount();
+        var data = Ff7.TempDir("inline-split-data");
+        var reader = new UnrealReader(data);
+        var game = new Game("test:split", "Split", Store.Other, install, "");
+        var h = Assert.Single(reader.IndexInline(provider, game, null, CancellationToken.None).Shaders.Keys);
+        using (var r = new StreamReader(new GZipStream(File.OpenRead(Path.Combine(new SCSKiller.Core.App.AppStore(data).GameDir(game.Id), "inline.idx")), CompressionMode.Decompress)))
+            Assert.Equal($"{h} A {2048 + 100 + Anchor(1).Length} Proj/Content/M_Split.uasset", r.ReadLine());
+        var got = new List<byte[]>();
+        reader.ReadInline(provider, game, new HashSet<string> { h }, (_, b) => got.Add(b), CancellationToken.None);
+        Assert.Equal(h, Convert.ToHexStringLower(SHA1.HashData(Assert.Single(got))));
+    }
+
+    sealed class Log(Action<string> a) : IProgress<string> { public void Report(string value) => a(value); }
+
+    /// <summary>A version 7 .pak (4.20 to 4.21: legacy index, 61-byte footer) of uncompressed, unencrypted files.</summary>
+    static void Pak(string path, params (string Name, byte[] Data)[] files)
+    {
+        using var f = new BinaryWriter(File.Create(path));
+        static void Entry(BinaryWriter w, long offset, long size) // FPakEntry: offset, sizes, compression flags, SHA-1, flags, block size
+        {
+            w.Write(offset); w.Write(size); w.Write(size); w.Write(0); w.Write(new byte[20]); w.Write((byte)0); w.Write(0u);
+        }
+        static void FString(BinaryWriter w, string s) { w.Write(s.Length + 1); w.Write(System.Text.Encoding.ASCII.GetBytes(s)); w.Write((byte)0); }
+        var at = new List<long>();
+        foreach (var (_, data) in files) { at.Add(f.BaseStream.Position); Entry(f, 0, data.Length); f.Write(data); } // each file's data follows a copy of its entry
+        using var index = new MemoryStream();
+        var iw = new BinaryWriter(index);
+        FString(iw, "../../../");
+        iw.Write(files.Length);
+        for (var i = 0; i < files.Length; i++) { FString(iw, files[i].Name); Entry(iw, at[i], files[i].Data.Length); }
+        var indexAt = f.BaseStream.Position;
+        f.Write(index.ToArray());
+        f.Write(new byte[16]); f.Write((byte)0); f.Write(0x5A6F12E1u); f.Write(7); f.Write(indexAt); f.Write(index.Length); f.Write(new byte[20]); // key GUID, encrypted index, magic, version, index offset/size/SHA-1
+    }
+
+    /// <summary>Packages are read in parallel up to a byte budget: the bytes held never pass it, except by one package
+    /// larger than the budget, which runs alone.</summary>
+    [Fact]
+    public void PackageBytesInFlightStayWithinTheBudget()
+    {
+        var budget = new UnrealReader.ByteBudget(100);
+        long held = 0;
+        Parallel.For(0, 200, new ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+        {
+            var bytes = i % 50 == 7 ? 500 : 30;
+            using var _ = budget.Take(bytes);
+            var now = Interlocked.Add(ref held, bytes);
+            Assert.True(bytes == 500 ? now == 500 : now <= 100, $"{now} held");
+            Thread.SpinWait(2000);
+            Interlocked.Add(ref held, -bytes);
+        });
     }
 }

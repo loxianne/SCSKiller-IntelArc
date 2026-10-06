@@ -1,3 +1,4 @@
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using CUE4Parse.Compression;
 
@@ -18,13 +19,19 @@ public static class Codecs
     public static string Dir => Path.Combine(AppStore.DefaultDir, "codecs");
     static readonly Lock Gate = new();
 
-    /// <summary>Loads Oodle, and zlib-ng with <paramref name="zlib"/>; a no-op once loaded. Two readers may start at once
-    /// (the lock: they'd race on the same download).</summary>
+    /// <summary>The pinned Oodle build runs AVX2, BMI2 and MOVBE code with no CPU check, which kills the process on a CPU
+    /// without them. Without it CUE4Parse decodes Oodle data in managed code.</summary>
+    public static bool NativeOodle => Avx2.IsSupported && Bmi2.X64.IsSupported;
+
+    public const string NoNativeOodle = "this CPU lacks AVX2/BMI2, which the Oodle library needs";
+
+    /// <summary>Loads Oodle (only where <see cref="NativeOodle"/>), and zlib-ng with <paramref name="zlib"/>; a no-op once
+    /// loaded. Two readers may start at once (the lock: they'd race on the same download).</summary>
     public static void Load(bool zlib = true)
     {
         lock (Gate)
         {
-            if (OodleHelper.Instance == null) OodleHelper.Initialize(Ensure(OodleHelper.OodleFileName, DownloadOodle));
+            if (NativeOodle && OodleHelper.Instance == null) OodleHelper.Initialize(Ensure(OodleHelper.OodleFileName, DownloadOodle));
             if (zlib && ZlibHelper.Instance == null) ZlibHelper.Initialize(Ensure(ZlibHelper.DllName, p => ZlibHelper.DownloadDll(p, null!)));
         }
     }

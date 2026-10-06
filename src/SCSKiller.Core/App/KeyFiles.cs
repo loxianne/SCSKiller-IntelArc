@@ -1,9 +1,10 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 namespace SCSKiller.Core.App;
 
 /// <summary>Record-key sets read from files (recordings, packs, a plan's and a warm's key files), cached while the file is
-/// the same: its size, write time and a hash of its first and last 4 KB. Every writer SCSKiller owns also calls
+/// the same: its size, write time, change time and file id, and a hash of its first and last 4 KB. Every writer SCSKiller owns also calls
 /// <see cref="Forget"/>. At most <see cref="MaxKeys"/> keys stay cached, the least recently used sets going first; a
 /// larger set is read each time.</summary>
 public static class KeyFiles
@@ -39,9 +40,13 @@ public static class KeyFiles
     /// time and sample, a missing one as missing) and <paramref name="extra"/> too; none when one can't be read.</summary>
     public static HashSet<string> Derived(string name, IEnumerable<string?> inputs, string extra, Func<HashSet<string>> compute)
     {
-        try { return Cached("derived|" + name, string.Join("|", inputs.Select(i => i == null ? "-" : Stamp(Path.GetFullPath(i)) ?? "missing").Append(extra)), compute); }
+        try { return Cached("derived|" + name, DerivedStamp(inputs, extra), compute); }
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { return []; }
     }
+
+    /// <summary>What <see cref="Derived"/> keys a set on: each input's stamp (a missing one as missing) and <paramref name="extra"/>.</summary>
+    public static string DerivedStamp(IEnumerable<string?> inputs, string extra) =>
+        string.Join("|", inputs.Select(i => i == null ? "-" : Stamp(Path.GetFullPath(i)) ?? "missing").Append(extra));
 
     static HashSet<string> Cached(string name, string stamp, Func<HashSet<string>> read)
     {
@@ -118,9 +123,35 @@ public static class KeyFiles
             var tail = new byte[(int)Math.Min(Sample, Math.Max(0, f.Length - head.Length))];
             f.Seek(-tail.Length, SeekOrigin.End);
             f.ReadExactly(tail);
-            return $"{f.Length}:{File.GetLastWriteTimeUtc(f.SafeFileHandle).Ticks}:{Convert.ToHexStringLower(SHA1.HashData([.. head, .. tail]))}";
+            return $"{f.Length}:{File.GetLastWriteTimeUtc(f.SafeFileHandle).Ticks}:{Identity(f.SafeFileHandle)}:{Convert.ToHexStringLower(SHA1.HashData([.. head, .. tail]))}";
         }
     }
+
+    /// <summary>The file's NTFS change time, volume serial and file id, read without its data: any write or replacement
+    /// moves the change time, which tools that set file times (an archive's extraction) can't set back. "" when the file
+    /// can't be opened; a part the file system doesn't give is left empty.</summary>
+    public static string Identity(string path)
+    {
+        using var h = CreateFileW(path, 0x80 /* FILE_READ_ATTRIBUTES: no sharing conflict */, 7, 0, 3 /* OPEN_EXISTING */, 0, 0);
+        return h.IsInvalid ? "" : Identity(h);
+    }
+
+    static string Identity(Microsoft.Win32.SafeHandles.SafeFileHandle h)
+    {
+        var changed = GetFileInformationByHandleEx(h, 0 /* FileBasicInfo */, out BasicInfo b, Marshal.SizeOf<BasicInfo>()) ? b.Changed.ToString() : "";
+        var id = GetFileInformationByHandleEx(h, 18 /* FileIdInfo */, out IdInfo i, Marshal.SizeOf<IdInfo>()) ? $"{i.Volume:x}-{i.High:x16}{i.Low:x16}" : "";
+        return $"{changed}/{id}";
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct BasicInfo { public long Created, Accessed, Written, Changed; public uint Attributes; }
+    [StructLayout(LayoutKind.Sequential)] struct IdInfo { public ulong Volume, Low, High; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, nint security, uint disposition, uint flags, nint template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle h, int infoClass, out BasicInfo info, int size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle h, int infoClass, out IdInfo info, int size);
 
     static readonly HashSet<string> Damaged = [];
 

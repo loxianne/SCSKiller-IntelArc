@@ -18,6 +18,10 @@ public sealed record MiddlewareDll(string Vendor, string Name, string Path, bool
 /// proxy's hash convention (SHA-1 of the container bytes sliced to the size at offset 24) -> file offset and size.</summary>
 public sealed record MiddlewareImage(string Path, string ContentHash, long Size, IReadOnlyDictionary<string, (long Offset, int Size)> Containers)
 {
+    /// <summary>The wave sizes of the containers that declare one, read by <see cref="Middleware.Scan"/>: <see cref="Runs"/>
+    /// reads nothing from the file then.</summary>
+    public IReadOnlyDictionary<string, (uint Min, uint Max)>? Lanes { get; init; }
+
     /// <summary>The container bytes, read from the file (read-only); null when the file no longer holds that hash there.</summary>
     public byte[]? Read(string sha1)
     {
@@ -30,7 +34,8 @@ public sealed record MiddlewareImage(string Path, string ContentHash, long Size,
     /// <summary>Whether a GPU of this vendor runs the container's [WaveSize]: NVIDIA 32 lanes only, AMD 32 or 64 (a
     /// FidelityFX DLL ships wave64 twins of its kernels for AMD, which NVIDIA's runtime rejects).</summary>
     public bool Runs(string sha1, bool amd) =>
-        Read(sha1) is not { } b || Dxbc.WaveLanes(b) is not { } l || l.Min <= 32 && l.Max >= 32 || amd && l.Min <= 64 && l.Max >= 64;
+        (Lanes != null ? Lanes.TryGetValue(sha1, out var known) ? known : null : Read(sha1) is { } b ? Dxbc.WaveLanes(b) : null) is not { } l
+        || l.Min <= 32 && l.Max >= 32 || amd && l.Min <= 64 && l.Max >= 64;
 }
 
 /// <summary>Middleware shader libraries (FidelityFX, XeSS, OptiScaler, DirectStorage...) next to a game's exe: detection
@@ -131,6 +136,46 @@ public static class Middleware
 
     static readonly ConcurrentDictionary<(string, string), MiddlewareImage> scans = new();
 
+    // each DLL's last scan by path, kept between runs (LoadImages, SaveImages): a start reads a DLL's stamp, not the whole file
+    static readonly Dictionary<string, KeptImage> kept = [];
+    static long keptVersion;
+    static readonly Dictionary<string, long> keptSaved = new(StringComparer.OrdinalIgnoreCase);   // file -> the version it holds
+    static readonly Lock keptGate = new();
+    static readonly JsonSerializerOptions KeptJson = new() { IncludeFields = true };   // the containers' offsets are tuples
+
+    sealed record KeptImage(string Stamp, MiddlewareImage Image);
+
+    /// <summary>Adds the scans <see cref="SaveImages"/> wrote to <paramref name="file"/>; one that can't be read adds none.</summary>
+    public static void LoadImages(string file)
+    {
+        try
+        {
+            if (!File.Exists(file) || JsonSerializer.Deserialize<Dictionary<string, KeptImage>>(File.ReadAllBytes(file), KeptJson) is not { } saved) return;
+            lock (keptGate)
+                foreach (var (path, k) in saved)
+                    if (k?.Image.Lanes != null) kept.TryAdd(path, k);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { }
+    }
+
+    /// <summary>Writes every DLL's last scan to <paramref name="file"/> when one was made since it was last written.</summary>
+    public static void SaveImages(string file)
+    {
+        lock (keptGate)
+        {
+            if (keptSaved.GetValueOrDefault(file) == keptVersion) return;
+            App.AppStore.WriteAtomic(file, JsonSerializer.SerializeToUtf8Bytes(kept, KeptJson));
+            keptSaved[file] = keptVersion;
+        }
+    }
+
+    /// <summary>Every scan forgotten, the saved ones too: each DLL is read again (a refresh the user asked for).</summary>
+    public static void ForgetScans()
+    {
+        scans.Clear();
+        lock (keptGate) kept.Clear();
+    }
+
     /// <summary>Hashes the file and every embedded container (read-only; cached per path and the file's size, write time
     /// and content sample, as <see cref="App.KeyFiles"/> tells a file).</summary>
     public static MiddlewareImage Scan(string path)
@@ -138,6 +183,8 @@ public static class Middleware
         var fi = new FileInfo(path);
         var key = (fi.FullName.ToLowerInvariant(), App.KeyFiles.Stamp(fi.FullName) ?? "");
         if (scans.TryGetValue(key, out var hit)) return hit;
+        lock (keptGate)
+            if (kept.GetValueOrDefault(key.Item1) is { } k && k.Stamp == key.Item2) return scans[key] = k.Image;
         byte[] data;
         using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         {
@@ -145,6 +192,7 @@ public static class Middleware
             f.ReadExactly(data);
         }
         var found = new Dictionary<string, (long, int)>();
+        var lanes = new Dictionary<string, (uint, uint)>();
         var span = data.AsSpan();
         for (var pos = 0; pos < span.Length;)
         {
@@ -153,12 +201,21 @@ public static class Middleware
             pos += k;
             var size = Dxbc.HeaderSize(span[pos..]);
             if (size > 0 && pos + (long)size <= span.Length && Dxbc.Valid(span.Slice(pos, size)))
-                found.TryAdd(Hex(SHA1.HashData(span.Slice(pos, size))), (pos, size));
+            {
+                var hash = Hex(SHA1.HashData(span.Slice(pos, size)));
+                if (found.TryAdd(hash, (pos, size)) && Dxbc.WaveLanes(span.Slice(pos, size)) is { } l) lanes[hash] = l;
+            }
             pos += 4;
         }
-        var image = new MiddlewareImage(fi.FullName, Hex(SHA1.HashData(data)), data.Length, found);
+        var image = new MiddlewareImage(fi.FullName, Hex(SHA1.HashData(data)), data.Length, found) { Lanes = lanes };
         if (scans.Count > 64) scans.Clear();
         scans[key] = image;
+        lock (keptGate)
+            if (key.Item2.Length > 0)
+            {
+                kept[key.Item1] = new(key.Item2, image);
+                keptVersion++;
+            }
         return image;
     }
 

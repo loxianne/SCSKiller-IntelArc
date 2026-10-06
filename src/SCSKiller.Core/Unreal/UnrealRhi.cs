@@ -11,8 +11,10 @@ namespace SCSKiller.Core.Unreal;
 ///      else to Steam's default entry when that runs DX12;
 ///   2. the user's GameUserSettings.ini: [D3DRHIPreference] PreferredRHI (5.1+) or bUseD3D12InGame, or a fork's own
 ///      PreferredGraphicsAPI (Gearbox). UE4 honours it only when the project doesn't set DefaultGraphicsRHI explicitly;
-///   3. [/Script/WindowsTargetPlatform.WindowsTargetSettings] DefaultGraphicsRHI over the Engine ini hierarchy (paks, then
-///      the user's saved Engine.ini); _Default or unset = the engine default: UE4 DX11, UE5 DX12.
+///   3. [/Script/WindowsTargetPlatform.WindowsTargetSettings] DefaultGraphicsRHI over the Engine ini hierarchy, from the
+///      engine's BaseEngine.ini (a fork may set it there: Dead Island 2) to the user's saved Engine.ini; _Default or unset =
+///      the engine default: UE4 DX11, UE5 DX12.
+/// A fork whose own WindowsDynamicRHI.cpp starts DX12 unless -dx11/-d3d11 is given (<see cref="Dx12Forks"/>) skips 2 and 3.
 /// Values: "D3D12" / "D3D11" / "Vulkan", suffixed " (launch option)", " (user setting)" or " (last run)" when that decided
 /// it rather than the project default; "D3D11 or D3D12" when it can't be decided: the project defaults to DX11 but ships
 /// DX12-only (SM6) shaders or ray tracing (DX12 is then a launch or in-game choice we can't see), the Steam launch menu offers
@@ -22,16 +24,64 @@ public static class UnrealRhi
 {
     public const string Ambiguous = "D3D11 or D3D12";
 
+    /// <summary>Forks whose engine starts DX12 unless the command line forces another RHI; their config takes no part.
+    /// FF7 Remake (4.18): read from its exe's PlatformCreateDynamicRHI.</summary>
+    static readonly string[] Dx12Forks = ["GAME_FinalFantasy7Remake"];
+
     /// <summary>Config files inside the paks that take part, lowest priority first ({P} = the project folder).</summary>
-    static readonly string[] EngineIni = ["Engine/Config/Windows/BaseWindowsEngine.ini", "{P}/Config/DefaultEngine.ini", "Engine/Config/Windows/WindowsEngine.ini", "{P}/Config/Windows/WindowsEngine.ini"];
+    static readonly string[] EngineIni = ["Engine/Config/BaseEngine.ini", "Engine/Config/Windows/BaseWindowsEngine.ini", "Engine/Platforms/Windows/Config/BaseWindowsEngine.ini",
+        ProjectEngineIni, "Engine/Config/Windows/WindowsEngine.ini", "Engine/Platforms/Windows/Config/WindowsEngine.ini", "{P}/Config/Windows/WindowsEngine.ini",
+        "{P}/Platforms/Windows/Config/WindowsEngine.ini"];
+    const string ProjectEngineIni = "{P}/Config/DefaultEngine.ini";
     static readonly string[] UserSettingsIni = ["{P}/Config/DefaultGameUserSettings.ini", "{P}/Config/Windows/WindowsGameUserSettings.ini"];
 
     static readonly string[] DeviceProfilesIni = ["Engine/Config/BaseDeviceProfiles.ini", "Engine/Config/Windows/WindowsDeviceProfiles.ini",
         "Engine/Platforms/Windows/Config/WindowsDeviceProfiles.ini", "{P}/Config/DefaultDeviceProfiles.ini", "{P}/Config/Windows/WindowsDeviceProfiles.ini",
         "{P}/Platforms/Windows/Config/WindowsDeviceProfiles.ini"];
 
-    /// <summary>Whether a pak file path is one of the config files <see cref="Resolve"/> or <see cref="RtPipelinesOff"/> reads.</summary>
-    public static bool IsConfig(string path, string project) => EngineIni.Concat(UserSettingsIni).Concat(DeviceProfilesIni).Any(p => Same(p, path, project));
+    static readonly string[] ConsoleVariablesIni = ["Engine/Config/ConsoleVariables.ini", "{P}/Config/ConsoleVariables.ini"];
+
+    /// <summary>Whether a pak file path is one of the config files <see cref="Resolve"/>, <see cref="RtPipelinesOff"/> or
+    /// <see cref="RayTracingOff"/> reads.</summary>
+    public static bool IsConfig(string path, string project) =>
+        EngineIni.Concat(UserSettingsIni).Concat(DeviceProfilesIni).Concat(ConsoleVariablesIni).Any(p => Same(p, path, project));
+
+    /// <summary>Ray tracing is off in the game (DRAGON BALL: Sparking! ZERO): [/Script/Engine.RendererSettings] r.RayTracing,
+    /// the last of the Engine ini hierarchy (base, project default, Windows platform layers) and the user's Engine.ini, is
+    /// off, and nothing that outranks it sets r.RayTracing to anything else: [SystemSettings] or [ConsoleVariables] of any
+    /// of those files, ConsoleVariables.ini, a device profile's CVars, the user's DeviceProfiles.ini, the launch options. The
+    /// cvar is read once at startup and gates all ray tracing. Unset is not off: a false off would leave ray tracing unplanned.</summary>
+    public static bool RayTracingOff(IReadOnlyDictionary<string, string> configs, string project, string? userDir = null, string launch = "")
+    {
+        var user = UserConfig(userDir);
+        string User(string file) => user != null && File.Exists(Path.Combine(user, file)) ? File.ReadAllText(Path.Combine(user, file)) : "";
+        var engine = Ordered(EngineIni, configs, project).Append(User("Engine.ini")).ToList();
+        if (Last(engine, Renderer, "r.RayTracing") is not { } v || !IsOff(v)) return false;
+        if (Regex.IsMatch(launch, @"r\.RayTracing(?![.\w])", RegexOptions.IgnoreCase)) return false;
+        var outranking = engine.Concat(Ordered(ConsoleVariablesIni, configs, project)).Concat(Ordered(DeviceProfilesIni, configs, project)).Append(User("DeviceProfiles.ini"));
+        return outranking.All(text => RayTracingCVars(text).All(IsOff));
+    }
+
+    const string Renderer = "/Script/Engine.RendererSettings";
+
+    /// <summary>The values r.RayTracing is given outside [/Script/Engine.RendererSettings]: as a key, or in a CVars entry.</summary>
+    static IEnumerable<string> RayTracingCVars(string ini)
+    {
+        string? section = null;
+        foreach (var raw in ini.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith('[')) { section = line.Trim('[', ']'); continue; }
+            var eq = line.IndexOf('=');
+            if (eq <= 0 || line[0] == ';') continue;
+            var key = line[..eq].TrimStart('+', '.', '-', '!').Trim();
+            var value = line[(eq + 1)..].Trim().Trim('"');
+            if (key.Equals("CVars", StringComparison.OrdinalIgnoreCase) && value.IndexOf('=') is > 0 and var ceq)
+                (key, value) = (value[..ceq].Trim(), value[(ceq + 1)..].Trim());
+            else if (section?.Equals(Renderer, StringComparison.OrdinalIgnoreCase) == true) continue;
+            if (key.Equals("r.RayTracing", StringComparison.OrdinalIgnoreCase)) yield return value;
+        }
+    }
 
     /// <summary>The Windows device profile sets r.RayTracing.AllowPipeline=0: the game never builds a ray tracing state
     /// object, only inline ray tracing (SILENT HILL: Townfall). CVars array entries: "+"/"." add, "-" removes the same
@@ -60,6 +110,10 @@ public static class UnrealRhi
         return v == "0";
     }
 
+    static bool IsOn(string v) => v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase);
+
+    static bool IsOff(string v) => v == "0" || v.Equals("false", StringComparison.OrdinalIgnoreCase);
+
     static bool Same(string pattern, string path, string project) => string.Equals(pattern.Replace("{P}", project), path, StringComparison.OrdinalIgnoreCase);
 
     static IEnumerable<string> Ordered(string[] order, IReadOnlyDictionary<string, string> configs, string project) =>
@@ -69,7 +123,7 @@ public static class UnrealRhi
     /// <see cref="IsConfig"/> selects; <paramref name="userDir"/>: the user's Saved folder or null; <paramref name="launch"/>:
     /// the command line the store adds; <paramref name="menu"/>, <paramref name="menuDefault"/>: <see cref="LaunchMenu"/>.</summary>
     public static (string Api, string Why) Resolve(int engineMajor, IReadOnlyCollection<string> platforms, IReadOnlyDictionary<string, string> configs,
-        string project, string? userDir, string launch, IReadOnlyList<string>? menu = null, string? menuDefault = null)
+        string project, string? userDir, string launch, IReadOnlyList<string>? menu = null, string? menuDefault = null, string? fork = null)
     {
         bool sm5 = platforms.Contains("PCD3D_SM5"), sm6 = platforms.Contains("PCD3D_SM6");
         if (sm6 && !sm5) return ("D3D12", "only SM6 shaders, which run on DX12 only");
@@ -77,7 +131,7 @@ public static class UnrealRhi
             return ($"{Api(cmd.Groups[1].Value)} (launch option)", $"launch option -{cmd.Groups[1].Value}");
         if (menu?.Any(e => MenuApi(e) != null) == true)
         {
-            var bare = Resolve(engineMajor, platforms, configs, project, userDir, launch);   // what an entry without a flag runs
+            var bare = Resolve(engineMajor, platforms, configs, project, userDir, launch, fork: fork);   // what an entry without a flag runs
             var plain = bare.Api.Split(" (")[0];
             var offered = menu.Select(e => MenuApi(e) ?? plain).Distinct().ToList();
             if (offered.Count == 1)
@@ -88,6 +142,7 @@ public static class UnrealRhi
                 return MenuApi(menuDefault) != null ? ("D3D12 (launch option)", "the default entry of the game's Steam launch menu passes D3D12, no log") : bare;
             return (Ambiguous, $"the game's Steam launch menu offers {string.Join(" / ", offered)}, no log");
         }
+        if (fork != null && Dx12Forks.Contains(fork)) return ("D3D12", $"{fork} starts DX12 unless -dx11 or -d3d11 is given");
 
         var userConfig = UserConfig(userDir);
         string? User(string file) => userConfig != null && File.Exists(Path.Combine(userConfig, file)) ? File.ReadAllText(Path.Combine(userConfig, file)) : null;
@@ -111,7 +166,7 @@ public static class UnrealRhi
         if (pref.Item1 is { } api && api != "?" && api != byProject && (engineMajor >= 5 || !explicitDefault))
             return ($"{api} (user setting)", $"{pref.Item2} in the user's GameUserSettings.ini over {why}");
 
-        if (!configs.Keys.Any(k => Same(EngineIni[1], k, project))) // the project's own config is unreadable (encrypted paks)
+        if (!configs.Keys.Any(k => Same(ProjectEngineIni, k, project))) // the project's own config is unreadable (encrypted paks)
         {
             if (LastRun(userDir) is { } log) return ($"{log.Api} (last run)", $"project config unreadable; the game's last log: {log.Line}");
             return sm5 && sm6 ? (Ambiguous, "project config unreadable, both SM5 and SM6 shaders ship, no log")
@@ -119,7 +174,7 @@ public static class UnrealRhi
         }
         if (byProject == "D3D11" && sm6) return (Ambiguous, $"{why}, but DX12-only (SM6) shaders ship: DX12 is a launch or in-game option");
         // a UE4 DX12 game may ship SM5 libraries only; ray tracing runs on DX12 only, so a project that ships it offers DX12
-        if (byProject == "D3D11" && Last(Ordered(EngineIni, configs, project), "/Script/Engine.RendererSettings", "r.RayTracing") is { } rt && (rt is "1" || rt.Equals("true", StringComparison.OrdinalIgnoreCase)))
+        if (byProject == "D3D11" && Last(Ordered(EngineIni, configs, project), "/Script/Engine.RendererSettings", "r.RayTracing") is { } rt && IsOn(rt))
             return (Ambiguous, $"{why}, but the project ships ray tracing (r.RayTracing={rt}), which runs on DX12 only: DX12 is a launch or in-game option");
         return (byProject, why + (pref.Item1 != null ? $"; user {pref.Item2} agrees or is ignored" : ""));
     }

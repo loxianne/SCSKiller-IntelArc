@@ -51,6 +51,19 @@ public class UnrealRhiTests(ITestOutputHelper output)
         Assert.Equal(UnrealRhi.Ambiguous, Api(5, Both, Config(Rhi("DefaultGraphicsRHI_DX11")))); // Palworld: DX12 shaders ship too
     }
 
+    /// <summary>Dead Island 2: its engine's BaseEngine.ini sets DX12 and the project doesn't override it.</summary>
+    [Fact]
+    public void EngineBaseDefault()
+    {
+        var config = Config("[/Script/Engine.RendererSettings]\n");
+        config["Engine/Config/BaseEngine.ini"] = Rhi("DefaultGraphicsRHI_DX12");
+        Assert.Equal("D3D12", Api(4, Sm5, config));
+        Assert.Equal("D3D12", Api(4, Sm5, config, UserDir("[D3DRHIPreference]\nPreferredRHI=dx11\n"))); // explicit: UE4 ignores the user
+        config["Game/Config/DefaultEngine.ini"] = Rhi("DefaultGraphicsRHI_Default");
+        Assert.Equal("D3D11", Api(4, Sm5, config)); // the project overrides the engine
+        Assert.Equal(UnrealRhi.Ambiguous, Api(4, Sm5, new() { ["Engine/Config/BaseEngine.ini"] = Rhi("DefaultGraphicsRHI_DX12") })); // project config encrypted
+    }
+
     [Fact]
     public void UserSettingsAndLaunchOptions()
     {
@@ -61,6 +74,19 @@ public class UnrealRhiTests(ITestOutputHelper output)
         Assert.Equal("D3D12 (user setting)", Api(4, Sm5, Config(""), UserDir("[/Script/OakGame.OakGameUserSettings]\nPreferredGraphicsAPI=DX12\n"))); // Gearbox
         Assert.Equal("D3D11 (launch option)", Api(5, Both, Config(Rhi("DefaultGraphicsRHI_DX12")), dx12Pref, "-dx11 -skipintro"));
         Assert.Equal("D3D12", Api(5, Both, Config(Rhi("DefaultGraphicsRHI_DX12")), launch: "-nodx11warning")); // not the flag
+    }
+
+    /// <summary>FF7 Remake's 4.18 fork starts DX12 unless -dx11/-d3d11 is given, whatever its config says; it ships SM5 only.</summary>
+    [Fact]
+    public void ForkStartsDx12()
+    {
+        const string ff7r = "GAME_FinalFantasy7Remake";
+        var config = Config("[/Script/Engine.RendererSettings]\n");
+        Assert.Equal("D3D12", UnrealRhi.Resolve(4, Sm5, config, "Game", null, "", fork: ff7r).Api);
+        Assert.Equal("D3D12", UnrealRhi.Resolve(4, Sm5, new Dictionary<string, string>(), "Game", null, "", fork: ff7r).Api);   // encrypted, no log
+        Assert.Equal("D3D11 (launch option)", UnrealRhi.Resolve(4, Sm5, config, "Game", null, "-d3d11", fork: ff7r).Api);
+        Assert.Equal(UnrealRhi.Ambiguous, UnrealRhi.Resolve(4, Sm5, config, "Game", null, "", [" Play", "-dx11 Play (DirectX 11)"], fork: ff7r).Api);
+        Assert.Equal("D3D11", UnrealRhi.Resolve(4, Sm5, config, "Game", null, "", fork: "GAME_FinalFantasy7Rebirth").Api);
     }
 
     [Fact]
@@ -201,10 +227,11 @@ public class UnrealRhiTests(ITestOutputHelper output)
         {
             ["FINAL FANTASY VII REBIRTH"] = "D3D12", ["Orcs Must Die! 3"] = "D3D11", ["Stellar Blade™ Demo"] = "D3D12", ["Palworld"] = UnrealRhi.Ambiguous,
             ["Life is Strange: Reunion"] = "D3D12", ["Darwin's Paradox"] = "D3D12", ["Lost Records: Bloom & Rage"] = "D3D12",
+            ["Dead Island 2"] = "D3D12", ["Deep Rock Galactic"] = "D3D11", ["High on Life"] = "D3D12",
         };
         var reader = new UnrealReader(Ff7.TempDir("rhi-data"));
         IEnumerable<Game> games;
-        try { games = new SteamSource().Discover().Concat(new EpicSource().Discover()).ToList(); }
+        try { games = new SteamSource().Discover().Concat(new EpicSource().Discover()).Concat(new XboxSource().Discover()).ToList(); }
         catch (Exception) { return; } // no stores on this machine
         foreach (var g in games)
         {

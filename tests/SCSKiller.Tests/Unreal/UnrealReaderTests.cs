@@ -287,6 +287,46 @@ public class UnrealReaderTests(ITestOutputHelper output)
         output.WriteLine($"{index.Shaders.Count} shaders, {index.Maps.Count} maps");
     }
 
+    /// <summary>.utoc version 8 is 5.5 to 5.7, so an anti-cheat game's fork may be of a later version than the 5.5 its
+    /// containers tell: Neverness to Everness' release fork (5.6) wins over its closed beta's (5.5), whose name only extends
+    /// the folder's. A version read from the exe is exact: a later version's fork isn't taken.</summary>
+    [Fact]
+    public void ForkOfTheVersionRangeTheContainersTellIsFound()
+    {
+        const CUE4Parse.UE4.Versions.EGame Ue55 = CUE4Parse.UE4.Versions.EGame.GAME_UE5_5, Ue57 = CUE4Parse.UE4.Versions.EGame.GAME_UE5_7,
+            Nte = CUE4Parse.UE4.Versions.EGame.GAME_NevernessToEverness;
+        Assert.Equal(Nte, UnrealReader.DetectFork(Ue55, Ue57, "Neverness to Everness", "HTGame"));
+        Assert.Equal(Nte, UnrealReader.DetectFork(CUE4Parse.UE4.Versions.EGame.GAME_UE5_6, CUE4Parse.UE4.Versions.EGame.GAME_UE5_6, "Neverness To Everness", "HTGame"));
+        Assert.NotEqual(Nte, UnrealReader.DetectFork(Ue55, Ue55, "Neverness to Everness", "HTGame"));
+    }
+
+    /// <summary>Dead Island 2 ships 4.27's IoStore containers on Dambuster's 4.25 fork: it is that fork, so it gets 4.25's rule,
+    /// when its folder, exe or title is exactly its name and only the containers told the version.
+    /// Its recording's most used root signature (a VS with 3 constant buffers, a PS with 2) is what that rule serializes,
+    /// byte for byte; 4.26's static samplers (s0-s5 in space 1000) made every one of its 8,313 recorded pipelines a miss.</summary>
+    [Fact]
+    public void DeadIsland2IsDambusters425ForkAndBuildsItsRootSignatures()
+    {
+        const CUE4Parse.UE4.Versions.EGame Ue427 = CUE4Parse.UE4.Versions.EGame.GAME_UE4_27, Di2 = CUE4Parse.UE4.Versions.EGame.GAME_DeadIsland2;
+        Assert.Equal(Di2, UnrealReader.DetectFork(Ue427, 0, "Content", "DeadIsland-WinGDK-Shipping", fromContainers: true));
+        Assert.Equal(Di2, UnrealReader.DetectFork(Ue427, 0, "Content", "Game-WinGDK-Shipping", fromContainers: true, title: "Dead Island 2"));
+        Assert.Null(UnrealReader.DetectFork(CUE4Parse.UE4.Versions.EGame.GAME_UE5_1, 0, "Content", "DeadIsland-WinGDK-Shipping", fromContainers: true));
+        // only on an exact name: a folder that merely starts with it is another game
+        Assert.Null(UnrealReader.DetectFork(Ue427, 0, "DeadIsland2-tools", "Tools-Win64-Shipping", fromContainers: true));
+        // only when the containers told the version: the exe's build string is exact
+        Assert.Null(UnrealReader.DetectFork(Ue427, 0, "Content", "DeadIsland-WinGDK-Shipping", fromContainers: false));
+        // a fork of the version the containers tell wins
+        Assert.Equal(CUE4Parse.UE4.Versions.EGame.GAME_HogwartsLegacy,
+            UnrealReader.DetectFork(Ue427, 0, "Hogwarts Legacy", "HogwartsLegacy", fromContainers: true, title: "Dead Island 2"));
+        var rule = SCSKiller.Core.Planning.RootSig.RuleFor(new EngineInfo("Unreal", "4.25", Di2.ToString(), "D3D12", false, null));
+        Assert.Equal(SCSKiller.Core.Planning.RootSig.Rule.Ue425, rule);
+        ShaderInfo S(Stage stage, int cbs) => new($"{stage}", stage, "5_0", 0, new(cbs, 0, 0, 0), [], [], []);
+        var rs = SCSKiller.Core.Planning.RootSig.Serialize(
+            SCSKiller.Core.Planning.RootSig.Build(rule!.Value, new Dictionary<Stage, ShaderInfo> { [Stage.Vertex] = S(Stage.Vertex, 3), [Stage.Pixel] = S(Stage.Pixel, 2) }, false),
+            SCSKiller.Core.Planning.RootSig.StaticSamplers(rule.Value));
+        Assert.Equal("8d8fee06ec8b183304303046cf42f66b4d6bcd4d", Convert.ToHexStringLower(System.Security.Cryptography.SHA1.HashData(rs)));
+    }
+
     /// <summary>A pak-era (version 2) library ends with its shaders' code, back to back after the header.</summary>
     [Fact]
     public void PakEraShaderLibraryEndsAfterItsCode()
@@ -305,6 +345,29 @@ public class UnrealReaderTests(ITestOutputHelper output)
         Assert.Equal(b.Length, UnrealReader.LibraryEnd(b, 20, ioStore: false));
         var arc = UnrealReader.ReadLibrary("x", b, CUE4Parse.UE4.Versions.EGame.GAME_UE5_6);
         Assert.Equal([4, 5, 6, 7, 8], arc.ShaderCode[1]);
+    }
+
+    /// <summary>Dead Island 2 (4.27 fork): the library names its compression format (FString "Zstd") between the header and
+    /// the code, and the code is Zstd.</summary>
+    [Fact]
+    public void ForkNamesItsShaderFormatBeforeTheCode()
+    {
+        var shader = Enumerable.Range(0, 300).Select(i => (byte)(i % 7)).ToArray();
+        var packed = new ZstdSharp.Compressor().Wrap(shader).ToArray();
+        var o = new MemoryStream();
+        var w = new BinaryWriter(o);
+        w.Write(2);
+        w.Write(1); w.Write(new byte[20]);                                                  // shader map hashes
+        w.Write(1); w.Write(new byte[20]);                                                  // shader hashes
+        w.Write(1); w.Write(0); w.Write(1); w.Write(0); w.Write(0);                         // map entries
+        w.Write(1); w.Write(0L); w.Write(packed.Length); w.Write(shader.Length); w.Write((byte)0);   // code entries
+        w.Write(0);                                                                         // preloads
+        w.Write(1); w.Write(0);                                                             // indices
+        w.Write(5); w.Write("Zstd\0"u8.ToArray());                                          // the fork's format name
+        w.Write(packed);
+        var arc = UnrealReader.ReadLibrary("x", o.ToArray(), CUE4Parse.UE4.Versions.EGame.GAME_UE4_27);
+        Assert.Equal(packed, arc.ShaderCode[0]);
+        Assert.Equal(shader, UnrealReader.Decompress(arc.ShaderCode[0], shader.Length));
     }
 
     /// <summary>Shader code no codec decompresses throws InvalidDataException, which indexing counts and skips, with the

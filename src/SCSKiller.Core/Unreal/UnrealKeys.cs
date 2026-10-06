@@ -13,7 +13,9 @@ public sealed class UnrealKeys(string dataDir)
 {
     string KeyFile(Game g) => Path.Combine(new AppStore(dataDir).GameDir(g.Id), "aes.key");
     string ScanFile(Game g) => Path.Combine(new AppStore(dataDir).GameDir(g.Id), "aes.scan");
-    static string Stamp(string exe) => new FileInfo(exe) is { Exists: true } f ? $"{f.Length}:{f.LastWriteTimeUtc.Ticks}" : "";
+    /// <summary>Bump when <see cref="Scan"/> finds keys it missed before: a remembered failure is then scanned again.</summary>
+    const int ScanVersion = 2;
+    static string Stamp(string exe) => new FileInfo(exe) is { Exists: true } f ? $"{ScanVersion}:{f.Length}:{f.LastWriteTimeUtc.Ticks}" : "";
 
     /// <summary>A key that <paramref name="opens"/> the game's encrypted containers: the stored one, else a static scan of
     /// the exe (not for anti-cheat games: their exe isn't read). <paramref name="why"/> says how, without the key.</summary>
@@ -118,8 +120,11 @@ public sealed class UnrealKeys(string dataDir)
                     if (b0 == 0xC7) // mov dword [base+disp], imm32 (optional REX.B, no REX.W/X)
                     {
                         var rex = (buf[i - 1] & 0xF0) == 0x40 ? buf[i - 1] : 0;
-                        if ((rex & 0x0A) == 0 && ((buf[i + 1] >> 3) & 7) == 0 && Mem(buf, i + 1, rex & 1, out var bas, out var disp) is > 0 and var ml)
-                            Store(pos, 4, bas, disp, buf[(i + 1 + ml)..(i + 5 + ml)]);
+                        // a 0x40-0x4F before it may be the last byte of the previous store's imm32, not a REX prefix: try both
+                        int[] prefixes = rex == 0 ? [0] : [rex, 0];
+                        foreach (var r in prefixes)
+                            if ((r & 0x0A) == 0 && ((buf[i + 1] >> 3) & 7) == 0 && Mem(buf, i + 1, r & 1, out var bas, out var disp) is > 0 and var ml)
+                                Store(pos, 4, bas, disp, buf[(i + 1 + ml)..(i + 5 + ml)]);
                     }
                     else if (b0 is 0x48 or 0x49 && buf[i + 1] is >= 0xB8 and <= 0xBF) // mov r64, imm64
                         regs[(buf[i + 1] - 0xB8) | ((b0 & 1) << 3)] = (pos, buf[(i + 2)..(i + 10)]);
