@@ -1,4 +1,5 @@
 using SCSKiller.Core;
+using SCSKiller.Core.App;
 using SCSKiller.Core.Vendors;
 using Xunit;
 
