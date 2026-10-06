@@ -64,7 +64,7 @@ public sealed class IntelBackend : IGpuVendorBackend, IRefreshableGpu
         return new CacheUsage(D3DSCacheDir, bytes, UpperBound: false);
     }
 
-    public CacheLimit? GetCacheLimit() => null;
+    public CacheLimit? GetCacheLimit() => new(Bytes: null, IsDriverDefault: false);
 
     public void SetCacheLimit(CacheLimit limit) =>
         throw new NotSupportedException($"the Intel shader cache size is not configurable ({Gpu.Name})");

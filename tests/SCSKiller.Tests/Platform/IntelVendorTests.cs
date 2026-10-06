@@ -23,7 +23,7 @@ public class IntelVendorTests
         Assert.False(backend.Caps.PerStageCache);
         Assert.Equal(RtCacheGranularity.WholeObject, backend.Caps.RtCacheGranularity);
         Assert.NotNull(backend.AppCache);
-        Assert.Null(backend.GetCacheLimit());
+        Assert.Equal(new CacheLimit(null, false), backend.GetCacheLimit());
         Assert.Throws<NotSupportedException>(() => backend.SetCacheLimit(new CacheLimit(100, false)));
     }
 

@@ -1031,7 +1031,7 @@ public sealed class QueueVm : Bindable
     public bool Empty => cur == null && Waiting.Count == 0;
     public bool HasFinished => Finished.Count > 0;
     public bool CanStart => !App.Core.QueueRunning && Waiting.Count > 0;
-    public bool CanRaiseLimit => App.Core.Vendor is not AmdBackend;   // AMD's limit is fixed (AmdAppCache.DxcCacheCap)
+    public bool CanRaiseLimit => App.Core.Vendor.Caps.CacheSizeConfigurable;
     public string Summary { get; private set; } = "";
     public string? PlanChecks { get; private set; }   // ScsKiller.PlanCheckLine
     public bool HasPlanChecks => PlanChecks != null;
@@ -1196,11 +1196,14 @@ public sealed class SettingsVm : Bindable
         + "When the cache is full the driver deletes older entries, and those games stutter again.";
     public bool Configurable => V.Caps.CacheSizeConfigurable;
     public bool NotConfigurable => !Configurable;
-    public string NotConfigurableText => V.Vendor == GpuVendor.Amd
-        ? $"The AMD driver's DirectX 12 shader cache is fixed at {Format.Bytes(AmdAppCache.DxcCacheCap)}; it has no size setting. "
-          + "Past it, the driver removes the least recently used games' caches when a game starts, and SCSKiller shows those games as needing a compile again."
-        : $"SCSKiller can't change the cache size of {Fmt.Vendor(V.Vendor)} drivers yet, so it only shows what is used. "
-          + "If games get evicted, raise the limit in your GPU vendor's control panel.";
+    public string NotConfigurableText => V.Vendor switch
+    {
+        GpuVendor.Amd => $"The AMD driver's DirectX 12 shader cache is fixed at {Format.Bytes(AmdAppCache.DxcCacheCap)}; it has no size setting. "
+          + "Past it, the driver removes the least recently used games' caches when a game starts, and SCSKiller shows those games as needing a compile again.",
+        GpuVendor.Intel => "Intel drivers have no configurable shader cache size limit on Windows; Direct3D 12 shader caches grow dynamically on disk.",
+        _ => $"SCSKiller can't change the cache size of {Fmt.Vendor(V.Vendor)} drivers yet, so it only shows what is used. "
+          + "If games get evicted, raise the limit in your GPU vendor's control panel."
+    };
 
     public string CurrentLimit => read == null ? Format.Dash : read.Value.Limit switch
     {
