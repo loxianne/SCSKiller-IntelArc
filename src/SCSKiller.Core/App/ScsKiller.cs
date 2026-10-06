@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -3955,6 +3955,16 @@ public sealed partial class ScsKiller : IScsKiller
                         rec.WarmedLayer = layer?.Fingerprint;
                         (rec.WarmedAt, rec.LastWarmTime, rec.LastCacheGrowthBytes) = (DateTimeOffset.Now, TimeSpan.FromSeconds(seconds), result.CacheGrowthBytes);
                         (rec.LastWarmFailed, rec.LastWarmSkipped, rec.LastWarmNeedsRecording, rec.WarmedKeys) = (result.Failed, result.Skipped, needsRecording, [.. cacheKeys]);
+                        if (AppCache is IntelAppCache intel)
+                        {
+                            var targetKey = rec.GameKeys.FirstOrDefault(k => k.StartsWith(IntelAppCache.D3dsPrefix, StringComparison.OrdinalIgnoreCase))
+                                ?? (D3DSCache.FoldersOf(intel.D3dsDir, game).FirstOrDefault() is { } folder ? $"{IntelAppCache.D3dsPrefix}{Path.GetFileName(folder)}" : null)
+                                ?? $"{IntelAppCache.D3dsPrefix}{IntelAppCache.D3dsPathHash(game.ExePath)}";
+                            intel.PromoteWarm(targetKey, cacheKeys, game.ExePath);
+                            rec.GameKeys.Add(targetKey);
+                            rec.CacheKeys.Add(targetKey);
+                            rec.WarmedKeys = [targetKey];
+                        }
                         rec.WarmedFiles = AppCache is AmdAppCache amd ? amd.D3D12FileNames(cacheKeys) : null;
                         rec.LastWarmCrashed = crashed;
                         // what this warm replayed: what is new after it is derived against it (PendingOf)

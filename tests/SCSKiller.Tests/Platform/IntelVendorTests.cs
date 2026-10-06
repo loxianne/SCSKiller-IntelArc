@@ -109,4 +109,92 @@ public class IntelVendorTests
         var usage = backend.GetCacheUsage();
         Assert.NotNull(usage.Path);
     }
+
+    [Fact]
+    public void Intel_D3dsPathHash_matches_Windows_d3dscache_hash()
+    {
+        Assert.Equal("f8a99be89df52393", IntelAppCache.D3dsPathHash(@"E:\SteamLibrary\steamapps\common\FINAL FANTASY VII REBIRTH\End\Binaries\Win64\ff7rebirth_.exe"));
+        Assert.Equal("52bd78272f3463a3", IntelAppCache.D3dsPathHash(@"E:\SteamLibrary\steamapps\common\FINAL FANTASY VII REMAKE\End\Binaries\Win64\ff7remake_.exe"));
+        Assert.Equal("3f0a791a7528c36c", IntelAppCache.D3dsPathHash(@"D:\Programmu\ludusavi.exe"));
+        Assert.Equal("83fe5639c8404bde", IntelAppCache.D3dsPathHash(@"C:\WINDOWS\Explorer.EXE"));
+    }
+
+    [Fact]
+    public void Intel_PromoteWarm_merges_and_promotes_caches()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "intel-promote-test-" + Guid.NewGuid().ToString("N")[..8]);
+        var d3ds = Path.Combine(tempDir, "D3DSCache");
+        var intelDir = Path.Combine(tempDir, "Intel");
+
+        try
+        {
+            var stagedDir = Path.Combine(d3ds, "staged_hash_123");
+            var targetDir = Path.Combine(d3ds, "target_hash_456");
+            Directory.CreateDirectory(stagedDir);
+            Directory.CreateDirectory(targetDir);
+
+            var dbName = "6F75932F-7DFC-4FB0-B4B8-12DE1AC415DA_VEN_8086&DEV_E20B&SUBSYS_6020&REV_0.dxcache";
+            var stagedDb = Path.Combine(stagedDir, dbName);
+            var targetDb = Path.Combine(targetDir, dbName);
+
+            // Create target db with 1 key
+            CreateTestDb(targetDb, @"E:\Games\MyGame\game.exe", [(1, "01020304")]);
+
+            // Create staged db with 1 overlapping key and 1 new key
+            CreateTestDb(stagedDb, @"C:\Temp\stage-1\game.exe", [(1, "01020304"), (2, "05060708")]);
+
+            var cache = new IntelAppCache(d3ds, intelDir);
+            cache.PromoteWarm("d3ds:target_hash_456", ["d3ds:staged_hash_123"], @"E:\Games\MyGame\game.exe");
+
+            // Staged directory should be deleted
+            Assert.False(Directory.Exists(stagedDir));
+
+            // Target db should now contain both keys (2 total)
+            Assert.Equal(2, CountKeys(targetDb));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
+    }
+
+    static void CreateTestDb(string path, string exePath, (int id, string hex)[] keys)
+    {
+        Assert.Equal(0, sqlite3_open(path, out var db));
+        try
+        {
+            Assert.Equal(0, sqlite3_exec(db, "CREATE TABLE keys(keyid INTEGER PRIMARY KEY, key BLOB, last_accessed REAL);", null, 0, 0));
+            Assert.Equal(0, sqlite3_exec(db, "CREATE TABLE vals(keyid INTEGER REFERENCES keys(keyid) ON DELETE CASCADE, type INTEGER, value BLOB);", null, 0, 0));
+            Assert.Equal(0, sqlite3_exec(db, "CREATE TABLE app_id(id INTEGER PRIMARY KEY, exe_path TEXT, app_name TEXT, engine_name TEXT, app_version INTEGER, engine_version INTEGER, app_profile_version INTEGER);", null, 0, 0));
+            Assert.Equal(0, sqlite3_exec(db, $"INSERT INTO app_id(id, exe_path) VALUES (0, '{exePath.Replace("'", "''")}');", null, 0, 0));
+            foreach (var (id, hex) in keys)
+            {
+                Assert.Equal(0, sqlite3_exec(db, $"INSERT INTO keys VALUES ({id}, x'{hex}', 100.0);", null, 0, 0));
+                Assert.Equal(0, sqlite3_exec(db, $"INSERT INTO vals VALUES ({id}, 1, x'{hex}aabb');", null, 0, 0));
+            }
+        }
+        finally { sqlite3_close(db); }
+    }
+
+    static int CountKeys(string path)
+    {
+        Assert.Equal(0, sqlite3_open(path, out var db));
+        try
+        {
+            int count = 0;
+            Assert.Equal(0, sqlite3_exec(db, "SELECT count(*) FROM keys;", (_, _, values, _) =>
+            {
+                var s = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(System.Runtime.InteropServices.Marshal.ReadIntPtr(values));
+                count = int.Parse(s!);
+                return 0;
+            }, 0, 0));
+            return count;
+        }
+        finally { sqlite3_close(db); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll")] static extern int sqlite3_open([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string file, out nint db);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll")] static extern int sqlite3_exec(nint db, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string sql, ExecCallback? callback, nint arg, nint error);
+    [System.Runtime.InteropServices.DllImport("winsqlite3.dll")] static extern int sqlite3_close(nint db);
+    delegate int ExecCallback(nint arg, int columns, nint values, nint names);
 }

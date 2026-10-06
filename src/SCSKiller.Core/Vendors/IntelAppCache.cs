@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Text;
+
 namespace SCSKiller.Core.Vendors;
 
 /// <summary>Intel's Direct3D 12 shader caches on Windows are stored within the system Direct3D shader cache
@@ -115,4 +118,240 @@ public sealed class IntelAppCache(string d3dsDir, string intelDir) : IAppCache
 
         return deleted;
     }
+
+    /// <summary>Calculates the deterministic DirectX D3DSCache subfolder hash for an executable path.</summary>
+    public static string D3dsPathHash(string path)
+    {
+        ulong crc = 0x012345678abcdef0UL;
+        var bytes = Encoding.Unicode.GetBytes(path);
+        foreach (var b in bytes)
+        {
+            int idx = (int)((b ^ (byte)(crc & 0xff)) & 0xff);
+            crc = (crc >> 8) ^ Crc64Table[idx];
+        }
+        return crc.ToString("x");
+    }
+
+    private static readonly ulong[] Crc64Table = InitCrc64Table();
+
+    private static ulong[] InitCrc64Table()
+    {
+        const ulong poly = 0x92c64265d32139a4UL;
+        var table = new ulong[256];
+        for (int i = 0; i < 256; i++)
+        {
+            ulong crc = (ulong)i;
+            for (int j = 0; j < 8; j++)
+            {
+                if ((crc & 1) != 0)
+                    crc = (crc >> 1) ^ poly;
+                else
+                    crc >>= 1;
+            }
+            table[i] = crc;
+        }
+        return table;
+    }
+
+    /// <summary>Promotes shader caches produced in temporary staging directories to the game's actual cache key,
+    /// merging SQLite databases and updating the app_id path.</summary>
+    public void PromoteWarm(string targetKey, IEnumerable<string> warmedKeys, string? gameExePath = null)
+    {
+        if (!Directory.Exists(D3dsDir)) return;
+        var normalizedTarget = NormalizeKey(targetKey);
+        var dstDir = Path.Combine(D3dsDir, normalizedTarget);
+        var sources = warmedKeys.Select(NormalizeKey)
+            .Where(k => !k.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (sources.Count == 0) return;
+        Directory.CreateDirectory(dstDir);
+
+        foreach (var srcKey in sources)
+        {
+            var srcDir = Path.Combine(D3dsDir, srcKey);
+            if (!Directory.Exists(srcDir)) continue;
+
+            var d = new DirectoryInfo(srcDir);
+            var dxcacheFiles = d.EnumerateFiles("*.dxcache").ToList();
+
+            foreach (var srcFile in dxcacheFiles)
+            {
+                var dstFile = Path.Combine(dstDir, srcFile.Name);
+                if (!File.Exists(dstFile))
+                {
+                    Checkpoint(srcFile.FullName);
+                    try
+                    {
+                        File.Copy(srcFile.FullName, dstFile, true);
+                        var srcWal = srcFile.FullName + "-wal";
+                        var srcShm = srcFile.FullName + "-shm";
+                        if (File.Exists(srcWal)) File.Copy(srcWal, dstFile + "-wal", true);
+                        if (File.Exists(srcShm)) File.Copy(srcShm, dstFile + "-shm", true);
+
+                        if (!string.IsNullOrEmpty(gameExePath))
+                        {
+                            SetAppIdExePath(dstFile, gameExePath);
+                        }
+                    }
+                    catch { }
+                }
+                else
+                {
+                    MergeDxcache(srcFile.FullName, dstFile, gameExePath);
+                }
+            }
+
+            // Cleanup the temporary staging folder
+            try
+            {
+                foreach (var f in d.EnumerateFiles())
+                {
+                    try { f.Delete(); } catch { }
+                }
+                if (!Directory.EnumerateFileSystemEntries(srcDir).Any())
+                {
+                    Directory.Delete(srcDir);
+                }
+            }
+            catch { }
+        }
+    }
+
+    private static void SetAppIdExePath(string dbPath, string gameExePath)
+    {
+        if (sqlite3_open_v2(dbPath, out var db, 0x06 /* READWRITE | CREATE */, 0) == 0)
+        {
+            try
+            {
+                var escaped = gameExePath.Replace("'", "''");
+                ExecSql(db, $"UPDATE app_id SET exe_path = '{escaped}' WHERE exe_path IS NOT NULL;");
+                ExecSql(db, "PRAGMA wal_checkpoint(FULL);");
+            }
+            finally { sqlite3_close_v2(db); }
+        }
+    }
+
+    private static void Checkpoint(string dbPath)
+    {
+        if (!File.Exists(dbPath)) return;
+        if (sqlite3_open_v2(dbPath, out var db, 0x06 /* READWRITE | CREATE */, 0) == 0)
+        {
+            try { ExecSql(db, "PRAGMA wal_checkpoint(FULL);"); }
+            finally { sqlite3_close_v2(db); }
+        }
+    }
+
+    private static void MergeDxcache(string srcDbPath, string dstDbPath, string? gameExePath)
+    {
+        Checkpoint(srcDbPath);
+        Checkpoint(dstDbPath);
+        if (sqlite3_open_v2(dstDbPath, out var db, 0x06 /* READWRITE | CREATE */, 0) != 0) return;
+        try
+        {
+            var escapedSrc = srcDbPath.Replace("'", "''");
+            if (!ExecSql(db, $"ATTACH DATABASE '{escapedSrc}' AS src;")) return;
+            try
+            {
+                ExecSql(db, "BEGIN TRANSACTION;");
+                ExecSql(db, """
+                    INSERT INTO keys (key, last_accessed)
+                    SELECT s.key, s.last_accessed
+                    FROM src.keys s
+                    WHERE s.key NOT IN (SELECT d.key FROM main.keys d);
+                    """);
+                ExecSql(db, """
+                    INSERT INTO vals (keyid, type, value)
+                    SELECT m.keyid, sv.type, sv.value
+                    FROM src.vals sv
+                    JOIN src.keys sk ON sv.keyid = sk.keyid
+                    JOIN main.keys m ON m.key = sk.key
+                    WHERE m.keyid NOT IN (SELECT v.keyid FROM main.vals v);
+                    """);
+                if (TableExists(db, "src", "groupkeys") && TableExists(db, "main", "groupkeys"))
+                {
+                    ExecSql(db, """
+                        INSERT INTO groupkeys (key, version)
+                        SELECT s.key, s.version
+                        FROM src.groupkeys s
+                        WHERE s.key NOT IN (SELECT d.key FROM main.groupkeys d);
+                        """);
+                    if (TableExists(db, "src", "groups") && TableExists(db, "main", "groups"))
+                    {
+                        ExecSql(db, """
+                            INSERT INTO groups (groupkeyid, valuekeyid)
+                            SELECT mg.keyid, mv.keyid
+                            FROM src.groups sg
+                            JOIN src.groupkeys sgk ON sg.groupkeyid = sgk.keyid
+                            JOIN main.groupkeys mg ON mg.key = sgk.key
+                            JOIN src.keys sk ON sg.valuekeyid = sk.keyid
+                            JOIN main.keys mv ON mv.key = sk.key
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM main.groups g 
+                                WHERE g.groupkeyid = mg.keyid AND g.valuekeyid = mv.keyid
+                            );
+                            """);
+                    }
+                }
+                if (!string.IsNullOrEmpty(gameExePath))
+                {
+                    var escapedExe = gameExePath.Replace("'", "''");
+                    ExecSql(db, $"UPDATE app_id SET exe_path = '{escapedExe}' WHERE exe_path IS NOT NULL;");
+                }
+                ExecSql(db, "COMMIT;");
+            }
+            catch
+            {
+                ExecSql(db, "ROLLBACK;");
+            }
+            finally
+            {
+                ExecSql(db, "DETACH DATABASE src;");
+            }
+            ExecSql(db, "PRAGMA wal_checkpoint(FULL);");
+        }
+        catch { }
+        finally { sqlite3_close_v2(db); }
+    }
+
+    private static bool TableExists(nint db, string schema, string table)
+    {
+        bool exists = false;
+        Rows(db, $"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name='{table}' LIMIT 1;", _ => exists = true);
+        return exists;
+    }
+
+    private static bool Rows(nint db, string sql, Action<nint> row)
+    {
+        if (sqlite3_prepare_v2(db, sql, -1, out var st, 0) != 0) return false;
+        try
+        {
+            int rc;
+            while ((rc = sqlite3_step(st)) == 100 /* ROW */) row(st);
+            return rc is 100 or 101 /* DONE */;
+        }
+        finally { sqlite3_finalize(st); }
+    }
+
+    private static bool ExecSql(nint db, string sql) =>
+        sqlite3_exec(db, sql, 0, 0, out _) == 0;
+
+    [DllImport("winsqlite3.dll", ExactSpelling = true)]
+    private static extern int sqlite3_open_v2([MarshalAs(UnmanagedType.LPUTF8Str)] string file, out nint db, int flags, nint vfs);
+
+    [DllImport("winsqlite3.dll", ExactSpelling = true)]
+    private static extern int sqlite3_close_v2(nint db);
+
+    [DllImport("winsqlite3.dll", ExactSpelling = true)]
+    private static extern int sqlite3_prepare_v2(nint db, [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, int bytes, out nint stmt, nint tail);
+
+    [DllImport("winsqlite3.dll", ExactSpelling = true)]
+    private static extern int sqlite3_step(nint stmt);
+
+    [DllImport("winsqlite3.dll", ExactSpelling = true)]
+    private static extern int sqlite3_finalize(nint stmt);
+
+    [DllImport("winsqlite3.dll", ExactSpelling = true)]
+    private static extern int sqlite3_exec(nint db, [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, nint callback, nint arg, out nint errMsg);
 }
