@@ -197,4 +197,14 @@ public class IntelVendorTests
     [System.Runtime.InteropServices.DllImport("winsqlite3.dll")] static extern int sqlite3_exec(nint db, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string sql, ExecCallback? callback, nint arg, nint error);
     [System.Runtime.InteropServices.DllImport("winsqlite3.dll")] static extern int sqlite3_close(nint db);
     delegate int ExecCallback(nint arg, int columns, nint values, nint names);
+
+    [Fact]
+    public void Intel_warm_misses_game_is_false_when_warmed_key_matches_target_key()
+    {
+        var rec = new GameRecord { GameKeys = ["d3ds:f8a99be89df52393"], WarmedKeys = ["d3ds:f8a99be89df52393"] };
+        Assert.False(ScsKiller.WarmMissesGame(rec));
+
+        var recMiss = new GameRecord { GameKeys = ["d3ds:f8a99be89df52393"], WarmedKeys = ["d3ds:3c92b6e6a1bc511e"] };
+        Assert.True(ScsKiller.WarmMissesGame(recMiss));
+    }
 }
