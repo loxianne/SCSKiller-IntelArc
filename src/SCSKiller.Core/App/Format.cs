@@ -25,14 +25,13 @@ public static class Format
     public static string Middleware(MiddlewareTag t) => t.Label + (t.Pipelines > 0 ? $": {t.Pipelines:N0} known pipelines, compiled with the game"
         : t.Label == "DLSS" ? ": compiled by the NVIDIA driver itself" : ": detected; added after a recording sees them");
 
-    /// <summary>The Library's notice that this GPU can't compile; null on NVIDIA and AMD, or once closed for this GPU
+    /// <summary>The Library's notice that this GPU can't compile; null on NVIDIA, AMD, and Intel, or once closed for this GPU
     /// (<paramref name="dismissedFor"/>: <see cref="Settings.GpuNoticeDismissed"/>).</summary>
-    public static string? GpuNotice(GpuInfo gpu, string? dismissedFor) => gpu.Vendor is GpuVendor.Nvidia or GpuVendor.Amd || dismissedFor == gpu.Name ? null
+    public static string? GpuNotice(GpuInfo gpu, string? dismissedFor) => gpu.Vendor is GpuVendor.Nvidia or GpuVendor.Amd or GpuVendor.Intel || dismissedFor == gpu.Name ? null
         : gpu.Vendor switch
         {
-            GpuVendor.Intel => "SCSKiller doesn't compile on Intel GPUs yet: how Intel's driver caches shaders hasn't been measured. Support is planned.",
             GpuVendor.Qualcomm => "SCSKiller doesn't compile on Qualcomm GPUs yet: how Qualcomm's driver caches shaders hasn't been measured.",
-            _ => "SCSKiller doesn't compile on this GPU yet: it only knows how NVIDIA and AMD drivers cache shaders.",
+            _ => "SCSKiller doesn't compile on this GPU yet.",
         };
 
     /// <summary>A Library row's note: a few words for the status's reason (the whole one is in the row's tooltip and on the

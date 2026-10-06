@@ -14,6 +14,7 @@ public static class GpuBackends
             {
                 GpuVendor.Nvidia => new NvidiaBackend(gpu),
                 GpuVendor.Amd => new AmdBackend(gpu),
+                GpuVendor.Intel => new IntelBackend(gpu),
                 _ => new UnsupportedVendor(gpu),
             };
         }

@@ -95,13 +95,13 @@ public class FormatTests
     [Fact]
     public void The_gpu_notice_shows_on_other_vendors_until_closed_for_that_gpu()
     {
-        Assert.StartsWith("SCSKiller doesn't compile on Intel GPUs yet", Format.GpuNotice(Gpu(GpuVendor.Intel, "Intel Graphics", 0), null));
+        Assert.Null(Format.GpuNotice(Gpu(GpuVendor.Intel, "Intel Graphics", 0), null));
         Assert.StartsWith("SCSKiller doesn't compile on Qualcomm GPUs yet", Format.GpuNotice(Gpu(GpuVendor.Qualcomm, "Adreno", 0), null));
         Assert.StartsWith("SCSKiller doesn't compile on this GPU yet", Format.GpuNotice(Gpu(GpuVendor.Unknown, "no D3D adapter", 0), null));
         Assert.Null(Format.GpuNotice(Gpu(GpuVendor.Nvidia, "NVIDIA GeForce", 8UL << 30), null));
         Assert.Null(Format.GpuNotice(Gpu(GpuVendor.Amd, "AMD Radeon", 8UL << 30), null));
-        Assert.Null(Format.GpuNotice(Gpu(GpuVendor.Intel, "Intel Graphics", 0), "Intel Graphics"));
-        Assert.NotNull(Format.GpuNotice(Gpu(GpuVendor.Intel, "Intel Arc", 0), "Intel Graphics"));   // another GPU than the one it was closed for
+        Assert.Null(Format.GpuNotice(Gpu(GpuVendor.Qualcomm, "Adreno", 0), "Adreno"));
+        Assert.NotNull(Format.GpuNotice(Gpu(GpuVendor.Qualcomm, "Adreno 2", 0), "Adreno"));
         Assert.Null(AppStore.DefaultSettings.GpuNoticeDismissed);
     }
 
