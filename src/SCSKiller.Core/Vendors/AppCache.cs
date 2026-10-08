@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace SCSKiller.Core.Vendors;
@@ -25,19 +25,20 @@ public static class AppCacheFiles
     /// between the check and the delete. Returns how many were deleted.</summary>
     public static int DeleteAll(IReadOnlyList<FileInfo> files)
     {
+        var distinct = files.DistinctBy(f => f.FullName, StringComparer.OrdinalIgnoreCase).ToList();
         var held = new List<FileStream>();
         try
         {
-            foreach (var f in files)
+            foreach (var f in distinct)
                 try { held.Add(new FileStream(f.FullName, FileMode.Open, FileAccess.Read, FileShare.Delete)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {
                     var users = ProcessesUsing(f.FullName).Select(Describe).ToList();
                     throw new InvalidOperationException($"files in use by {(users.Count > 0 ? string.Join(", ", users) : "another process")} ({f.Name})", e);
                 }
-            foreach (var f in files) if (f.IsReadOnly) f.IsReadOnly = false;   // Delete refuses a read-only file: none is deleted before all can be
-            foreach (var f in files) f.Delete();   // gone once our handles close
-            return files.Count;
+            foreach (var f in distinct) if (f.IsReadOnly) f.IsReadOnly = false;   // Delete refuses a read-only file: none is deleted before all can be
+            foreach (var f in distinct) f.Delete();   // gone once our handles close
+            return distinct.Count;
         }
         finally { foreach (var h in held) h.Dispose(); }
     }

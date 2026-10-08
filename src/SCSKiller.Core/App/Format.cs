@@ -5,11 +5,12 @@ public static class Format
 {
     public const string Dash = "—";
 
-    /// <summary>"3.2 GB" from 1 GiB up, else whole MB; a dash for null.</summary>
+    /// <summary>"3.2 GB" from 1 GiB up, whole MB below, "< 1 MB" when non-zero under 1 MiB; a dash for null.</summary>
     public static string Bytes(long? b) => b switch
     {
         null => Dash,
         >= 1L << 30 => $"{b / (double)(1L << 30):0.#} GB",
+        > 0 and < 1L << 20 => "< 1 MB",
         _ => $"{b / (double)(1 << 20):0} MB",
     };
 

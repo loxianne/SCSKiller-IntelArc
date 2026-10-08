@@ -208,4 +208,23 @@ public class IntelVendorTests
         var recMiss = new GameRecord { GameKeys = ["d3ds:f8a99be89df52393"], WarmedKeys = ["d3ds:3c92b6e6a1bc511e"] };
         Assert.True(ScsKiller.WarmMissesGame(recMiss));
     }
+
+    [Fact]
+    public void AppCacheFiles_DeleteAll_handles_duplicate_files_without_sharing_violation()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), "scsk_test_" + Guid.NewGuid().ToString("N") + ".dxcache");
+        try
+        {
+            File.WriteAllBytes(tempFile, [1, 2, 3, 4]);
+            var fi = new FileInfo(tempFile);
+            // Passing the same file multiple times (as happened between DriverPart and WindowsPart on Intel)
+            var deleted = AppCacheFiles.DeleteAll([fi, new FileInfo(tempFile), fi]);
+            Assert.Equal(1, deleted);
+            Assert.False(File.Exists(tempFile));
+        }
+        finally
+        {
+            if (File.Exists(tempFile)) File.Delete(tempFile);
+        }
+    }
 }

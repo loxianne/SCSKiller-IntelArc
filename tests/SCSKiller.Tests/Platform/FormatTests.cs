@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using SCSKiller.Core;
 using SCSKiller.Core.App;
 using SCSKiller.Core.Vendors;
@@ -14,8 +14,8 @@ public class FormatTests
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
         try
         {
-            Assert.Equal(["—", "0 MB", "512 MB", "1024 MB", "1 GB", "3.2 GB"],
-                new long?[] { null, 0, 512L << 20, (1L << 30) - 1, 1L << 30, (long)(3.2 * (1L << 30)) }.Select(Format.Bytes));
+            Assert.Equal(["—", "0 MB", "< 1 MB", "512 MB", "1024 MB", "1 GB", "3.2 GB"],
+                new long?[] { null, 0, 100 * 1024, 512L << 20, (1L << 30) - 1, 1L << 30, (long)(3.2 * (1L << 30)) }.Select(Format.Bytes));
         }
         finally { CultureInfo.CurrentCulture = was; }
     }

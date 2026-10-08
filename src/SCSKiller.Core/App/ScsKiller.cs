@@ -1800,9 +1800,11 @@ public sealed partial class ScsKiller : IScsKiller
         var s = Find(gameId);
         var rec = Store.LoadGame(gameId);
         var parts = new List<CachePart>();
-        if (AppCache != null && DriverKeys(s.Game, rec).Keys is { Count: > 0 } keys) parts.Add(Part(DriverPart, AppCache.FilesOf(keys)));
+        var driverFiles = AppCache != null && DriverKeys(s.Game, rec).Keys is { Count: > 0 } keys ? AppCache.FilesOf(keys) : [];
+        if (driverFiles.Count > 0) parts.Add(Part(DriverPart, driverFiles));
         if (s.AntiCheat != AntiCheat.None) return parts;   // anti-cheat: nothing near the game, only the driver's cache
-        parts.Add(Part(WindowsPart, D3DSCache.FoldersOf(Path.Combine(LocalAppData, "D3DSCache"), s.Game).SelectMany(D3DSCache.CacheFiles)));
+        var driverPaths = driverFiles.Select(f => f.FullName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        parts.Add(Part(WindowsPart, D3DSCache.FoldersOf(Path.Combine(LocalAppData, "D3DSCache"), s.Game).SelectMany(D3DSCache.CacheFiles).Where(f => !driverPaths.Contains(f.FullName))));
         if (!gamePrecache) return parts.Where(p => p.Files.Count > 0).ToList();
         // two games with one project name share the file name: whose it is is unknown, skipped
         if (UnrealUserCache.Project(s.Game.ExePath) is { } project
@@ -1844,10 +1846,12 @@ public sealed partial class ScsKiller : IScsKiller
                 ": the driver gives their exes the same key (an app profile, or the same exe name), so clearing it would clear theirs too");
         var parts = GameCaches(gameId, gamePrecache);
         if (!driver && parts.Count == 0) return false;
-        AppCacheFiles.DeleteAll(parts.SelectMany(p => p.Files).Select(f => new FileInfo(f)).ToList());   // throws "files in use by <process>"
-        foreach (var dir in parts.Where(p => p.Name == WindowsPart).SelectMany(p => p.Files).Select(Path.GetDirectoryName).Distinct())
-            try { Directory.Delete(dir!); }
-            catch (IOException) { }   // not empty: a file appeared meanwhile, left alone
+        AppCacheFiles.DeleteAll(parts.SelectMany(p => p.Files).Select(f => new FileInfo(f)).ToList());
+        var d3dsRoot = Path.Combine(LocalAppData, "D3DSCache");
+        foreach (var dir in parts.SelectMany(p => p.Files).Select(Path.GetDirectoryName).Distinct())
+            if (dir != null && string.Equals(Path.GetDirectoryName(dir), d3dsRoot, StringComparison.OrdinalIgnoreCase))
+                try { if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir); }
+                catch (IOException) { }
         if (!driver) return true;
         // the keys stay: they are this exe name's, so the cache the game builds by itself still counts in CacheOnDisk
         if (!IsUnreached(rec)) rec.UnreachedWarm = null;   // a verdict on an older warm: with WarmedAt gone it would apply again
