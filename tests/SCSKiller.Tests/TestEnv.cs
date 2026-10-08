@@ -7,7 +7,7 @@ namespace SCSKiller.Tests;
 /// Games: the folders in SCSKILLER_TEST_GAMES_ROOT (';'-separated folders that hold game install folders, like
 /// steamapps\common), then every Steam library's steamapps\common (Steam's libraryfolders.vdf), then each fixed drive's
 /// XboxGames. Dev data (the GPU lock, recordings): SCSKILLER_DEV_DIR; the GPU is also busy while the file named by
-/// SCSKILLER_GPU_BUSY_FILE exists. A development tree may set both defaults in TestEnv.Private.cs; elsewhere the dev
+/// SCSKILLER_GPU_BUSY_FILE exists. A development tree may set both defaults in a partial of its own; elsewhere the dev
 /// folder is %TEMP%\scskiller-test and nothing else marks the GPU busy.</summary>
 static partial class TestEnv
 {
@@ -39,6 +39,11 @@ static partial class TestEnv
     }
 
     static string? Env(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : null;
+
+    /// <summary>The codecs the readers load come from the build's cache, as build\publish.ps1's do, never the app's data folder.</summary>
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void BuildCodecs() => SCSKiller.Core.App.Codecs.DirOverride =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCSKiller-build", "codecs");
 
     /// <summary>SCSKILLER_TEST_GAMES_ROOT's folders, then Steam's libraries' steamapps\common, existing ones only.</summary>
     public static readonly IReadOnlyList<string> SteamCommon = FindSteamCommon();

@@ -74,6 +74,8 @@ public sealed class FakeScsKiller : IScsKiller
             G("1139900", "Ghostrunner", "4.25", "Ghostrunner-Win64-Shipping.exe", 18_770, GameStatus.Ready, Core.Planning.Planner.Untested) with { Middleware = [new("DLSS", ["nvngx_dlss.dll"], 0)] },
             G("3489700", "Stellar Blade Demo", "4.26", "SB-Win64-Shipping.exe", 94_473, GameStatus.Ready, Core.Planning.Planner.Untested),
             G("1522820", "Orcs Must Die! 3", "4.26", "OrcsMustDie3.exe", 20_932, GameStatus.Ready, Core.Planning.Planner.NoRecording),
+            // a compile over 16 GB (480,000 shaders: about 32 GB of cache), the queue's large-compile warning
+            G("1285190", "Borderlands 4", "5.5", "Borderlands4.exe", 480_000, GameStatus.Ready, Core.Planning.Planner.Untested),
             // in the community database, which this signed-out PC doesn't download from
             // a real exe: its icon loads (the screenshots' library-groups checks it survives re-display)
             G("1623730", "Palworld", "5.1", "Palworld-Win64-Shipping.exe", 122_835, GameStatus.NeedsRecording, Core.Planning.Planner.Record + "; " + Core.App.ScsKiller.InDbNote, at: "xbox",
@@ -97,18 +99,65 @@ public sealed class FakeScsKiller : IScsKiller
             },
             G("3200000", "Windrose Demo", "5.5", "Windrose-Win64-Shipping.exe", null, GameStatus.Unsupported, "shaders cannot be read yet", encrypted: true),
             G("554620", "Life is Strange Remastered", "4.23", "LiSRemastered.exe", null, GameStatus.Unsupported, materials, unsupported: materials),
-            // known to stutter (the real list): two recommended, Elden Ring blocked by anti-cheat
+            // known to stutter (the real list): two recommended, Elden Ring waiting for an offline session (not recommended)
             // fully covered from its files alone, compiled an hour ago, nothing failed, a session without a stutter
             G("Sample.AtomicHeart", "Atomic Heart", "4.27", "AtomicHeart-WinGDK-Shipping.exe", 157_069, GameStatus.Warmed, "", at: "xbox",
                 plan: new PlanStats(0, 188_730, 212, 118, false, StageSets: 188_730), cache: 4_500_000_000, time: TimeSpan.FromMinutes(7)) with
             {
-                WarmedDriverVersion = "610.88", WarmedAt = DateTimeOffset.Now.AddHours(-1), LastWarmTime = TimeSpan.FromSeconds(372), CacheOnDisk = 4_310_000_000,
+                WarmedDriverVersion = "610.88", WarmedAt = DateTimeOffset.Now.AddHours(-1), LastWarmTime = TimeSpan.FromSeconds(372), CacheOnDisk = 4_294_967_296, CacheInUse = 2_790_000_000,
                 LastWarmFailed = 0, LastWarmSkipped = 0, LastSession = new SessionStats(TimeSpan.FromMinutes(41), 2_310, 0, 2_310, 0, 1.2),
             },
+            // a warm on a D3D12 runtime without the game's Agility SDK: the driver rejected most of the plan
+            G("1778820", "TEKKEN 8", "5.1", "Polaris-Win64-Shipping.exe", 61_480, GameStatus.Warmed,
+                "partly compiled for driver 616.92: the driver refused 180,412 of 258,210 pipelines, so those can still stutter the first time",
+                plan: new PlanStats(39_870, 218_340, 2_410, 386, true, StageSets: 218_340), cache: 13_000_000_000, time: TimeSpan.FromMinutes(30)) with
+            {
+                WarmedDriverVersion = "616.92", WarmedAt = DateTimeOffset.Now.AddDays(-3), LastWarmTime = TimeSpan.FromSeconds(13), CacheOnDisk = 1_610_000_000,
+                LastWarmFailed = 180_412, LastWarmSkipped = 0,
+            },
+            // runs on DirectX 11 or 12: both compiled
+            G("warthunder", "War Thunder", "-", "aces.exe", 41_206, GameStatus.Warmed, "warmed for driver 610.88", at: "gaijin",
+                plan: new PlanStats(0, 38_114, 38_114, 12, true, D3D11Shaders: 41_206, StageSets: 38_114), cache: 2_100_000_000, time: TimeSpan.FromMinutes(3)) with
+            {
+                Engine = new EngineInfo("Dagor", "11.3", null, "D3D11 or D3D12", false, null),
+                WarmedDriverVersion = "610.88", WarmedAt = DateTimeOffset.Now.AddDays(-2), LastWarmTime = TimeSpan.FromSeconds(163), CacheOnDisk = 1_980_000_000,
+                LastWarmFailed = 0, LastWarmSkipped = 0,
+            },
+            // on the "not supported yet" list
+            G("4078430", "STAR WARS: Galactic Racer", "5.7", "GalacticRacer-Win64-Shipping.exe", 48_210, GameStatus.Unsupported, "An app update is needed for support"),
+            // a fictional game whose first launch after a compile still compiled it (NVIDIA)
+            G("Sample.HollowCircuit", "Hollow Circuit", "5.6", "HollowCircuit-WinGDK-Shipping.exe", 52_904, GameStatus.Warmed, ScsKiller.UnreachedReason, at: "xbox",
+                plan: new PlanStats(8_412, 84_390, 1_120, 140, true, StageSets: 84_390), cache: 2_900_000_000, time: TimeSpan.FromMinutes(6)) with
+            {
+                WarmedDriverVersion = "610.88", WarmedAt = DateTimeOffset.Now.AddDays(-1), LastWarmTime = TimeSpan.FromSeconds(351), CacheOnDisk = 2_740_000_000,
+                LastWarmFailed = 0, LastWarmSkipped = 0, CompileUnreached = true,
+            },
             G("1286680", "Tiny Tina's Wonderlands", "4.21", "Wonderlands.exe", 38_112, GameStatus.NeedsRecording, Core.Planning.Planner.Record) with { Playing = true },
-            G("1245620", "ELDEN RING", "-", "eldenring.exe", null, GameStatus.Unsupported, "needs a recording, which EasyAntiCheat blocks") with { AntiCheat = AntiCheat.EasyAntiCheat,
+            // played with the recorder in, nothing recorded: another exe of its folder ran, the game changed, the recorder never loaded
+            G("13504", "Assassin's Creed Valhalla", "DXBC", "ACValhalla.exe", 21_388, GameStatus.NeedsRecording, Core.Planning.Planner.Record, at: "ubisoft") with
+            {
+                Engine = new EngineInfo(Core.Carved.CarvedReader.Family, "DXBC", null, "D3D12", false, null), RecorderOverride = RecorderOverride.On, RecorderEffective = true,
+                RecorderInstalled = true, RecorderRefused = ScsKiller.RanOtherExeNote("ACValhalla.exe"),
+            },
+            G("3900030", "Ember Tide", "5.2", "EmberTide-Win64-Shipping.exe", 33_610, GameStatus.NeedsRecording, Core.Planning.Planner.Record) with
+                { RecorderOverride = RecorderOverride.On, RecorderEffective = true, RecorderInstalled = true, RecorderRefused = ScsKiller.GameChangedNote },
+            G("3900040", "Quiet Orbit", "5.4", "QuietOrbit-Win64-Shipping.exe", 29_975, GameStatus.NeedsRecording, Core.Planning.Planner.Record) with
+                { RecorderOverride = RecorderOverride.On, RecorderEffective = true, RecorderInstalled = true, RecorderRefused = ScsKiller.NeverSawNote },
+            G("1245620", "ELDEN RING", "-", "eldenring.exe", null, GameStatus.NeedsRecording, ScsKiller.OfflineSessionNote) with { AntiCheat = AntiCheat.EasyAntiCheat,
                 Engine = new EngineInfo("FromSoft", "Dantelion", null, "D3D12", false, null), OfflineEligible = true, OfflineRecord = true },
             G("293760", "Automation", "4.27", "Automation-Win64-Shipping.exe", null, GameStatus.Unsupported, packed, unsupported: packed, at: "gog"),
+            // guesses: the version (no build string, no .utoc, no readable package), the DirectX (no DefaultGraphicsRHI), both
+            G("CoffeeStainStudios.DeepRockGalactic", "Deep Rock Galactic", "4.27", "FSD-WinGDK-Shipping.exe", 18_350, GameStatus.Ready, "compiles every DirectX 11 shader", at: "xbox")
+                with { Engine = new EngineInfo("Unreal", "4.27", null, "D3D11", false, null, VersionGuessed: true, ApiGuessed: true) },
+            G("3900010", "Harbor Lights", "5.3", "Harbor-Win64-Shipping.exe", 44_120, GameStatus.Ready, Core.Planning.Planner.NoRecording)
+                with { Engine = new EngineInfo("Unreal", "5.3", null, "D3D12", false, null, VersionGuessed: true) },
+            G("3900020", "Moss Valley", "5.4", "MossValley-Win64-Shipping.exe", 27_840, GameStatus.Ready, Core.Planning.Planner.NoRecording)
+                with { Engine = new EngineInfo("Unreal", "5.4", null, "D3D12", false, null, ApiGuessed: true) },
+            G("1292630", "3on3 FreeStyle: Rebound", "5.1", "DoubleClutch-Win64-Shipping.exe", null, GameStatus.Unsupported, "encrypted game files (needs the game's AES key)") with
+            {
+                AntiCheat = AntiCheat.Other,
+                Engine = new EngineInfo("Unreal", "5.1", null, Core.Unreal.UnrealRhi.Ambiguous, true, "encrypted game files (needs the game's AES key)", VersionGuessed: true),
+            },
             // added by the user from their exe: no store launches them
             G("5f1c0e9a2b7d4c30", "The Talos Principle 2", "5.3", "Talos2-Win64-Shipping.exe", 71_244, GameStatus.Ready, Core.Planning.Planner.NoRecording, at: "manual"),
             G("a93e4b1170cd2f86", "Satisfactory", "5.3", "FactoryGameSteam-Win64-Shipping.exe", 39_512, GameStatus.Unsupported,
@@ -206,7 +255,8 @@ public sealed class FakeScsKiller : IScsKiller
     public IReadOnlyList<CachePart> GameCaches(string gameId, bool gamePrecache = false)
     {
         lock (gate)
-            return games.FirstOrDefault(x => x.Game.Id == gameId)?.CacheOnDisk is { } bytes ? [new CachePart(Core.App.ScsKiller.DriverPart, [], bytes)] : [];
+            return games.FirstOrDefault(x => x.Game.Id == gameId)?.CacheOnDisk is { } bytes
+                ? [new CachePart(Core.App.ScsKiller.DriverPart, [], bytes), new CachePart(Core.App.ScsKiller.WindowsPart, [], bytes / 20)] : [];
     }
 
     public bool ClearGameCache(string gameId, bool gamePrecache = false)

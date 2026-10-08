@@ -112,10 +112,27 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
     static readonly string[] HelperHints =
         ["launch", "bootstrap", "helper", "crash", "webview", "uploader", "gpudetection", "hashdatabase", "setup", "redist", "unins", "reporter", "cache_builder"];
 
+    /// <summary>The exes an Xbox app game's MicrosoftGame.config lists as not the game (dev-only, another device family, a
+    /// helper), full paths; none without a config that can be read.</summary>
+    internal static HashSet<string> NotTheGame(string content)
+    {
+        var config = Path.Combine(content, "MicrosoftGame.config");
+        try
+        {
+            if (!File.Exists(config)) return [];
+            var doc = XDocument.Load(config);
+            var ns = doc.Root!.GetDefaultNamespace();
+            return (doc.Root.Element(ns + "ExecutableList")?.Elements(ns + "Executable") ?? []).Where(e => !IsGameExecutable(e))
+                .Select(e => e.Attribute("Name")?.Value).OfType<string>().Select(n => Path.GetFullPath(Path.Combine(content, n)))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Xml.XmlException or ArgumentException or NotSupportedException) { return []; }
+    }
+
     static bool IsGameExecutable(XElement e)
     {
         var n = e.Attribute("Name")?.Value;
-        if (n == null || HelperHints.Any(h => n.Contains(h, StringComparison.OrdinalIgnoreCase))) return false;
+        if (n == null || LauncherOrUtility(n)) return false;
         var family = e.Attribute("TargetDeviceFamily")?.Value;
         if (family != null && !family.Contains("PC", StringComparison.OrdinalIgnoreCase)) return false;
         return !string.Equals(e.Attribute("IsDevOnly")?.Value, "true", StringComparison.OrdinalIgnoreCase);
@@ -127,9 +144,12 @@ public sealed class XboxSource(IEnumerable<string>? driveRoots = null) : IGameSo
     {
         var opts = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 3, IgnoreInaccessible = true };
         return Directory.EnumerateFiles(content, "*.exe", opts)
-            .Where(f => !HelperHints.Any(h => Path.GetFileName(f).Contains(h, StringComparison.OrdinalIgnoreCase)) && !GameFiles.IsHelper(f))
+            .Where(f => !LauncherOrUtility(Path.GetFileName(f)) && !GameFiles.IsHelper(f))
             .Select(f => new FileInfo(f)).MaxBy(f => f.Length)?.FullName;
     }
+
+    /// <summary>A launcher's or utility's exe by its name (<see cref="HelperHints"/>).</summary>
+    internal static bool LauncherOrUtility(string name) => HelperHints.Any(h => name.Contains(h, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>"&lt;package family&gt;!&lt;app id&gt;" of an Xbox game (its Content\appxmanifest.xml), null for any other game.</summary>
     public static string? AppUserModelId(Game g)

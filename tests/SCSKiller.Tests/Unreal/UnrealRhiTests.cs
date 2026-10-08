@@ -1,4 +1,4 @@
-using SCSKiller.Core;
+﻿using SCSKiller.Core;
 using SCSKiller.Core.App;
 using SCSKiller.Core.Games;
 using SCSKiller.Core.Planning;
@@ -50,6 +50,44 @@ public class UnrealRhiTests(ITestOutputHelper output)
         Assert.Equal("D3D12", Api(4, Sm6, Config(Rhi("DefaultGraphicsRHI_DX11")))); // SM6 runs on DX12 only
         Assert.Equal(UnrealRhi.Ambiguous, Api(5, Both, Config(Rhi("DefaultGraphicsRHI_DX11")))); // Palworld: DX12 shaders ship too
     }
+
+    /// <summary>The engine's default decides only when nothing names an API: that DirectX is a guess (EngineInfo.ApiGuessed).</summary>
+    [Fact]
+    public void TheEngineDefaultIsAGuess()
+    {
+        static bool Guess(int ue, string[] platforms, Dictionary<string, string> config, string? user = null, string launch = "")
+        {
+            UnrealRhi.Resolve(ue, platforms, config, "Game", user, launch, out var engineDefault);
+            return engineDefault;
+        }
+        var unset = Config("[/Script/Engine.RendererSettings]\n");
+        Assert.True(Guess(4, Sm5, unset));                                                   // UE4's DX11
+        Assert.True(Guess(5, Both, Config(Rhi("DefaultGraphicsRHI_Default"))));             // UE5's DX12
+        Assert.False(Guess(5, Both, Config(Rhi("DefaultGraphicsRHI_DX12"))));
+        Assert.False(Guess(4, Sm6, unset));                                                  // SM6 only runs on DX12
+        Assert.False(Guess(4, Sm5, unset, launch: "-dx12"));
+        Assert.False(Guess(5, Both, unset, UserDir("[D3DRHIPreference]\nPreferredRHI=dx12\n")));   // the user's setting agrees
+        Assert.False(Guess(5, Both, unset, UserDir("[D3DRHIPreference]\nPreferredRHI=dx11\n")));
+        // a Steam launch menu offering DX11 and DX12 whose default entry passes nothing runs the engine's default
+        UnrealRhi.Resolve(5, Both, unset, "Game", null, "", out var plainDefault, ["", "-dx11"], "");
+        Assert.True(plainDefault);
+        UnrealRhi.Resolve(5, Both, unset, "Game", null, "", out var flaggedDefault, ["-dx12", "-dx11"], "-dx12");
+        Assert.False(flaggedDefault);
+    }
+
+    /// <summary>The game page's note: a guessed version matters on DirectX 12 (root signatures), not on a confirmed DirectX 11.</summary>
+    [Theory]
+    [InlineData(true, false, "D3D12", "Unreal version guessed")]
+    [InlineData(true, false, "D3D12 (launch option)", "Unreal version guessed")]
+    [InlineData(true, false, UnrealRhi.Ambiguous, "Unreal version guessed")]
+    [InlineData(false, true, "D3D11", "DirectX guessed")]
+    [InlineData(false, true, "D3D12", "DirectX guessed")]
+    [InlineData(true, true, "D3D11", "Unreal version and DirectX guessed")]
+    [InlineData(true, false, "D3D11", null)]
+    [InlineData(false, false, "D3D12", null)]
+    public void GuessNote(bool version, bool api, string graphicsApi, string? note) =>
+        Assert.Equal(note == null ? null : note + ", so the compile could be wrong.",
+            ScsKiller.GuessNote(new EngineInfo("Unreal", "5.1", null, graphicsApi, false, null, VersionGuessed: version, ApiGuessed: api)));
 
     /// <summary>Dead Island 2: its engine's BaseEngine.ini sets DX12 and the project doesn't override it.</summary>
     [Fact]
@@ -110,6 +148,11 @@ public class UnrealRhiTests(ITestOutputHelper output)
         // encrypted: unreadable before the key, the shipped config decides after it
         Assert.Equal(UnrealRhi.Ambiguous, Api(4, Sm5, new()));
         Assert.Equal(UnrealRhi.Ambiguous, Api(4, Sm5, Config(Rhi("DefaultGraphicsRHI_DX11") + rt)));
+        // a readable config that offers DX12 goes by the game's last log, like an unreadable one
+        Assert.Equal("D3D11 (last run)", Api(4, Sm5, Config(rt), UserDir("", "LogD3D11RHI: Chosen D3D11 Adapter:\n")));
+        Assert.Equal("D3D12 (last run)", Api(4, Both, Config(Rhi("DefaultGraphicsRHI_DX11")), UserDir("", "LogRHI: Using Default RHI: D3D12\n")));
+        // the player chose DX11 after a DX12 run: the choice, not the older log
+        Assert.Equal("D3D11 (user setting)", Api(5, Both, Config(Rhi("DefaultGraphicsRHI_DX11")), UserDir("[D3DRHIPreference]\nPreferredRHI=dx11\n", "LogRHI: Using Default RHI: D3D12\n")));
         var user = UserDir("");
         File.WriteAllText(Path.Combine(user, "Config", "Windows", "Engine.ini"), rt);
         Assert.Equal("D3D11", Api(4, Sm5, Config(Rhi("DefaultGraphicsRHI_DX11")), user));   // the player's own ini doesn't ship ray tracing
@@ -210,6 +253,7 @@ public class UnrealRhiTests(ITestOutputHelper output)
         var ue = new EngineInfo("Unreal", "4.26", null, "D3D11", false, null);
         Assert.Equal(new PlanCheck(Readiness.Unsupported, "runs on DirectX 11"), p.Check(Ff7.Game, ue, null, Ff7.Nvidia with { Profile = "unmeasured" }));
         Assert.Equal(new PlanCheck(Readiness.Unsupported, "runs on DirectX 11 (user setting)"), p.Check(Ff7.Game, ue with { GraphicsApi = "D3D11 (user setting)" }, null, Ff7.Nvidia with { Profile = "unmeasured" }));
+        Assert.Equal(new PlanCheck(Readiness.Unsupported, "runs on DirectX 11 (last run)"), p.Check(Ff7.Game, ue with { GraphicsApi = "D3D11 (last run)" }, null, Ff7.Amd));
         Assert.Equal(new PlanCheck(Readiness.Unsupported, "runs on Vulkan"), p.Check(Ff7.Game, ue with { GraphicsApi = "Vulkan" }, null, Ff7.Nvidia));
         Assert.Equal(Readiness.Ready, p.Check(Ff7.Game, ue with { GraphicsApi = "D3D12 (user setting)" }, null, Ff7.Nvidia).Readiness);
         var both = p.Check(Ff7.Game, ue with { GraphicsApi = UnrealRhi.Ambiguous }, null, Ff7.Nvidia);
@@ -217,12 +261,55 @@ public class UnrealRhiTests(ITestOutputHelper output)
         Assert.Contains("DirectX 11", both.Reason);
     }
 
+    /// <summary>NVIDIA Aftermath shader debug info from the Engine ini hierarchy: STAR WARS: Galactic Racer sets only
+    /// DumpShaderDebugInfo in [SystemSettings] (Aftermath itself is on by default), Gears of War: E-Day both in a
+    /// [ConsoleVariables] section that opens its file after a BOM. The generic r.GPUCrashDebugging takes no part.</summary>
+    [Fact]
+    public void AftermathShaderDebugInfoFromTheEngineConfig()
+    {
+        const string dump = "r.GPUCrashDebugging.Aftermath.DumpShaderDebugInfo", on = "r.GPUCrashDebugging.Aftermath";
+        static bool Debug(string defaultEngine, string? windowsEngine = null) => UnrealRhi.AftermathShaderDebug(Config(defaultEngine, windowsEngine), "Game");
+        Assert.True(Debug($"[SystemSettings]\n{dump}=1\n"));
+        Assert.True(Debug($"\uFEFF[ConsoleVariables]\r\n{on}=1\r\n{dump}=1\r\n"));
+        Assert.True(Debug($"[ConsoleVariables]\n{dump}=True\n"));
+        Assert.True(Debug("[ConsoleVariables]\nr.GPUCrashDebugging.Aftermath.TrackAll=1\n"));   // all feature flags
+        Assert.False(Debug($"[ConsoleVariables]\n{on}=0\n{dump}=1\n"));
+        Assert.False(Debug($"[ConsoleVariables]\n{on}=1\n"));   // crash dumps alone keep the key
+        Assert.False(Debug($"[/Script/Engine.RendererSettings]\nr.GPUCrashDebugging=true\n[ConsoleVariables]\n{on}=1\n"));
+        Assert.False(Debug($"[/Script/Engine.RendererSettings]\n{dump}=1\n"));   // not a cvar section
+        Assert.False(Debug($"[SystemSettings]\n{dump}=1\n", $"[SystemSettings]\n{dump}=0\n"));   // the platform file comes last
+        Assert.False(Debug($"[SystemSettings]\n{dump}=1\n", $"[SystemSettings]\n{on}=false\n"));
+
+        // launch options, as UE::RHI::ShouldEnableGPUCrashFeature reads them
+        static bool Launch(string ini, string launch) => UnrealRhi.AftermathShaderDebug(Config(ini), "Game", launch);
+        var racer = $"[SystemSettings]\n{dump}=1\n";
+        Assert.False(Launch(racer, "-nogpucrashdebugging"));
+        Assert.False(Launch(racer, "-windowed -nvaftermath=0"));
+        Assert.True(Launch(racer, "-nogpucrashdebugging -nvaftermath"));
+        Assert.True(Launch($"[ConsoleVariables]\n{on}=0\n{dump}=1\n", "-gpucrashdebugging"));
+        Assert.True(Launch("[ConsoleVariables]\n", "-nvAftermathDumpShaderDebugInfo"));
+        Assert.True(Launch(racer, "-nogpucrashdebuggingx"));   // another switch
+    }
+
+    /// <summary>The Aftermath library where the engine loads it from, in a version folder too (FINAL FANTASY VII REBIRTH).</summary>
+    [Fact]
+    public void AftermathShipsInTheEnginesThirdPartyFolder()
+    {
+        var root = Ff7.TempDir("aftermath-" + Guid.NewGuid().ToString("N")[..8]);
+        var paks = Directory.CreateDirectory(Path.Combine(root, "Game", "Content", "Paks")).FullName;
+        Assert.False(UnrealReader.ShipsAftermath(paks));
+        File.WriteAllText(Path.Combine(paks, "..", "..", "..", "GFSDK_Aftermath_Lib.x64.dll"), "");
+        Assert.False(UnrealReader.ShipsAftermath(paks));
+        var dir = Directory.CreateDirectory(Path.Combine(root, "Engine", "Binaries", "ThirdParty", "NVIDIA", "NVaftermath", "2.23", "Win64")).FullName;
+        File.WriteAllText(Path.Combine(dir, "GFSDK_Aftermath_Lib.x64.dll"), "");
+        Assert.True(UnrealReader.ShipsAftermath(paks));
+    }
+
     /// <summary>The installed UE games (dev machine; read-only: paks, the user's saved ini, logs, Steam launch options).
     /// Expectations only where the project's own config or shader formats settle it.</summary>
     [Fact]
     public void InstalledGames()
     {
-        Ff7.Codecs();
         var expect = new Dictionary<string, string>
         {
             ["FINAL FANTASY VII REBIRTH"] = "D3D12", ["Orcs Must Die! 3"] = "D3D11", ["Stellar Blade™ Demo"] = "D3D12", ["Palworld"] = UnrealRhi.Ambiguous,
@@ -236,8 +323,10 @@ public class UnrealRhiTests(ITestOutputHelper output)
         foreach (var g in games)
         {
             if (reader.Detect(g, out var why) is not { } e) continue;
-            output.WriteLine($"{g.Name,-45} UE {e.Version,-4} {e.GraphicsApi,-22} {why}");
-            if (expect.TryGetValue(g.Name, out var api)) Assert.Equal(api, e.GraphicsApi);
+            output.WriteLine($"{g.Name,-45} UE {e.Version,-4} {e.GraphicsApi,-22} {(e.AftermathShaderDebug ? "Aftermath shader debug info, " : "")}{why}");
+            if (g.Name.Contains("Galactic Racer") || g.Name.Contains("E-Day")) Assert.True(e.AftermathShaderDebug, g.Name);
+            if (expect.TryGetValue(g.Name, out var api))   // an undecided config goes by the game's last log when there is one
+                Assert.True(api == e.GraphicsApi || api == UnrealRhi.Ambiguous && e.GraphicsApi.EndsWith(" (last run)"), $"{g.Name}: {e.GraphicsApi}");
         }
     }
 }

@@ -4,7 +4,7 @@ using CUE4Parse.Compression;
 
 namespace SCSKiller.Core.App;
 
-/// <summary>CUE4Parse's native codecs live in %LOCALAPPDATA%\SCSKiller\codecs (docs/patreon-and-updates.md §4.5 item 4),
+/// <summary>CUE4Parse's native codecs live in %LOCALAPPDATA%\SCSKiller\codecs,
 /// not next to the exe: every update replaces the install folder, and public packages don't ship Oodle. A copy next to the
 /// exe (a zip or dev build) seeds it; otherwise CUE4Parse downloads it there from its GitHub release. A file is loaded
 /// only if its SHA-256 is the pinned one: a new build of either DLL comes with a CUE4Parse update and a new pin.</summary>
@@ -16,7 +16,9 @@ public static class Codecs
         ["zlib-ng2.dll"] = "454be2f3d10f804ace577198401431db5e95d0286b59589bc28a40085388e7c2",           // Zlib-ng.NET 1.0.0
     };
 
-    public static string Dir => Path.Combine(AppStore.DefaultDir, "codecs");
+    public static string Dir => DirOverride ?? Path.Combine(AppStore.DefaultDir, "codecs");
+    // the tests' build-owned cache: they never read the app's data folder
+    internal static string? DirOverride;
     static readonly Lock Gate = new();
 
     /// <summary>The pinned Oodle build runs AVX2, BMI2 and MOVBE code with no CPU check, which kills the process on a CPU

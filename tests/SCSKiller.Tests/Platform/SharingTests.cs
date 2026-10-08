@@ -9,7 +9,7 @@ using static SCSKiller.Tests.Platform.CommunityTests;
 
 namespace SCSKiller.Tests.Platform;
 
-// Anonymous uploads of this PC's recordings (docs/db-contract.md "Anonymous uploads") against a fake handler: no network,
+// Anonymous uploads of this PC's recordings against a fake handler: no network,
 // synthetic recordings only.
 public class SharingTests : IDisposable
 {

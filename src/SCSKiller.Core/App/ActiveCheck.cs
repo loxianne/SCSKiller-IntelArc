@@ -3,7 +3,7 @@ using System.Text;
 
 namespace SCSKiller.Core.App;
 
-/// <summary>The anonymous daily check (docs/db-contract.md "Active installs"): at most one POST /v1/active per UTC day,
+/// <summary>The anonymous daily check: at most one POST /v1/active per UTC day,
 /// with no identifier, token or account. Its three flags come from the date of the last check the server accepted
 /// (active-check.txt), so the server counts installs per day, week and month without telling them apart. Internal and
 /// dev builds send nothing. Quiet: a failure waits an hour, and the flags stay as they were.</summary>

@@ -109,7 +109,9 @@ public sealed class ReEngineReader(string dataDir, Func<string, string?>? downlo
             byte[] data;
             try { data = pak.Read(pak.Entries[i]); }
             catch (Exception e) when (e is InvalidDataException or IOException or ZstdSharp.ZstdException) { continue; }
-            if (Dxbc.Containers(data).FirstOrDefault() is { Container: { } c }) return new(Family, version, null, Api(dir, !Dxbc.Part(c, "DXIL"u8).IsEmpty), false, null);
+            // any DXIL in it: a DirectX 12 game may ship SM5 DXBC beside its SM6 (Resident Evil Village's first file: 264 of 378)
+            var cs = Dxbc.Containers(data).Select(x => x.Container).ToList();
+            if (cs.Count > 0) return new(Family, version, null, Api(dir, cs.Any(c => !Dxbc.Part(c, "DXIL"u8).IsEmpty)), false, null);
         }
         var top = string.Join(", ", magics.OrderByDescending(p => p.Value).Take(5).Select(p => $"{Name(p.Key)} x{p.Value}"));
         return new(Family, version, null, Api(dir, null), false, $"no shader containers in its packages' material files (commonest files: {top})");
@@ -261,7 +263,7 @@ public sealed class ReEngineReader(string dataDir, Func<string, string?>? downlo
     static readonly Regex Capability = new(@"^\s*Capability\s*=\s*DirectX(1[12])", RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
     /// <summary>config.ini's [Render] Capability (the game writes it on first run: DirectX12 / DirectX11), else D3D12 when
-    /// its shaders are DXIL (SM6 runs on DX12 only), else "D3D11 or D3D12".</summary>
+    /// its shaders include DXIL (SM6 runs on DX12 only), else "D3D11 or D3D12".</summary>
     static string Api(string dir, bool? dxil)
     {
         try

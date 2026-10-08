@@ -28,23 +28,37 @@ public partial class App : Application
     static readonly TimeSpan SessionEndWait = TimeSpan.FromSeconds(10);
 
     static Tray? tray;
-    static bool notifications, toldAboutTray, quitting, checkingDriver, checkAgain;
+    static bool notifications, quitting, checkingDriver, checkAgain;
     static string? toldDriver;   // the driver and games the last driver-update notification was about
     static Dictionary<string, string>? told;   // NewShaders' notified store
     static TaskCompletionSource? quitNow;   // set while quitting waits for the compile to finish: the tray's Quit again ends it
     static readonly CancellationTokenSource stopWatching = new();
     static Task watcher = Task.CompletedTask;
 
-    public App() => InitializeComponent();
+    public App()
+    {
+        UnhandledException += (_, e) => Program.LogCrash(e.Exception);   // logged, not handled: WinUI ends the app as it would have
+        InitializeComponent();
+    }
 
     public static bool Quitting => quitting;
     /// <summary>Closing the window hides it to the notification area (the tray's Quit really quits).</summary>
     public static bool HidesOnClose => tray is { Added: true };   // also while quitting waits: closing must not end the process
 
+    protected override void OnLaunched(LaunchActivatedEventArgs e)
+    {
+        try { Launch(); }
+        catch (Exception ex)
+        {
+            Program.StartFailed(ex, Environment.GetCommandLineArgs());
+            throw;
+        }
+    }
+
     // Args: --fake (sample data), --screenshots <dir> (fake data, off-screen, never activated, then exit),
     // --driver-updated (PLATFORM's scheduled task after a driver update leaves stale games in Ask mode),
     // --tray (the sign-in entry, WindowsStartup: starts in the notification area, no window).
-    protected override void OnLaunched(LaunchActivatedEventArgs e)
+    void Launch()
     {
         var args = Environment.GetCommandLineArgs();
         int shots = Array.IndexOf(args, "--screenshots");
@@ -58,6 +72,7 @@ public partial class App : Application
             real.Community = new Community(AppStore.DefaultDir, Account.GetDbTokenAsync);
             real.Sharing = new Sharing(AppStore.DefaultDir, () => real.Settings.ShareRecordings);   // anonymous: never the Patreon sign-in
             real.ContentRoutes = RouteFailover.Default;
+            real.ChannelAccess = async () => (await Account.GetAccessTokenAsync(), Account.Status?.Ent);
             // the entitlements first: the update check picks the channel they allow
             real.UserFetch = async () => { await Account.RefreshAsync(); await Updater.CheckAsync(); };
             // not before the welcome, which says it is sent and where to turn it off
@@ -71,6 +86,7 @@ public partial class App : Application
             watcher = real.WatchGames(stopWatching.Token);
         }
         Main = new MainWindow();
+        if (shots < 0) Main.RestorePlacement(Core is ScsKiller own ? own.Store : new AppStore(fakeDir));   // screenshots: always the default size
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(Main);
         if (Core is ScsKiller seen) seen.Unseen = () => !IsWindowVisible(hwnd) || IsIconic(hwnd);
 
@@ -201,7 +217,18 @@ public partial class App : Application
         if (a.Kind == ExtendedActivationKind.AppNotification) { OnToast(((AppNotificationActivatedEventArgs)a.Data).Arguments); return; }
         var line = (a.Data as Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs)?.Arguments ?? "";
         if (line.Contains("--driver-updated")) NotifyDriverUpdate(exitIfNothing: false);
+        else if (line.Contains(MemoryArg)) LogMemory();
         else if (!line.Contains(WindowsStartup.TrayArg)) ShowWindow();
+    }
+
+    /// <summary>`SCSKiller.exe --memory` while the app runs: a line of what it holds in memory.log, for a bug report. Counts
+    /// only, nothing of the process's contents. The window stays as it is.</summary>
+    const string MemoryArg = "--memory";
+
+    static void LogMemory()
+    {
+        if (Core is ScsKiller k)
+            Task.Run(() => ScsKiller.AppendLog(k.Store.DataDir, ProcessMemory.LogFile, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz} {ProcessMemory.Line()}", 1 << 20));
     }
 
     /// <summary>Brings the window back from the notification area (or from behind other windows).</summary>
@@ -213,16 +240,16 @@ public partial class App : Application
         SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(Main));
     }
 
-    /// <summary>The window's close button: hide to the notification area; the first time per run, say where it went.</summary>
+    /// <summary>The window's close button: hide to the notification area; the first time ever, say where it went.</summary>
     public static void HideToTray()
     {
         Main.AppWindow.Hide();
-        if (toldAboutTray || !notifications) return;
-        toldAboutTray = true;
+        if (Core.Settings.TrayNoticeShown || !notifications) return;   // notifications off: shown once they're on
+        Core.Settings = Core.Settings with { TrayNoticeShown = true };
         AppNotificationManager.Default.Show(new AppNotificationBuilder()
             .AddArgument("action", "open")
             .AddText("SCSKiller is still running")
-            .AddText("It's in the notification area; right-click the icon to quit.")
+            .AddText("It's in the notification area, right-click the icon to quit.")
             .BuildNotification());
     }
 
@@ -309,6 +336,7 @@ public partial class App : Application
             },
             SessionEnd = hwnd =>
             {
+                Main.SavePlacement();
                 // the session ends when this returns: bounded, then the warm job kills whatever is left
                 for (var clock = System.Diagnostics.Stopwatch.StartNew(); Running() != null && clock.Elapsed < SessionEndWait;) Thread.Sleep(100);
                 ShutdownBlockReasonDestroy(hwnd);
@@ -352,6 +380,7 @@ public partial class App : Application
         if (quitNow != null) { quitNow.TrySetResult(); return; }
         if (quitting) return;
         quitting = true;
+        Main.SavePlacement();
         try
         {
             if (Core.Compiling)   // a removed item's warm too: it is still saving
@@ -398,8 +427,8 @@ public partial class App : Application
     {
         if (!notifications || !Core.Settings.NotifyNewShaders) return;
         told ??= store.LoadNotified();
-        var (due, notified) = NewShaders.Due(Core.Games, Core.Queue, told, Core.DriverStaleGames().Select(s => s.Game.Id).ToHashSet());
-        if (due.Count == 0 && notified.Count == told.Count) return;   // entries only drop without a notification
+        var (due, notified) = NewShaders.Due(Core.Games, Core.Queue, told, Core.DriverStaleGames().Select(s => s.Game.Id).ToHashSet(), DateTimeOffset.UtcNow);
+        if (due.Count == 0 && notified.Count == told.Count && notified.All(e => told.GetValueOrDefault(e.Key) == e.Value)) return;
         store.SaveNotified(told = notified);   // before showing: never twice
         if (due.Count > 0) AppNotificationManager.Default.Show(NewShadersToast(due));
     }

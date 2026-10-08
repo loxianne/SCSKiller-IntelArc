@@ -37,14 +37,24 @@ const string Usage = """
       reference export <game> [--out <file>]      the game build's shader list for the community server's `admin reference import`:
                                                   the index's shaders and those this PC's recording saw (default <game id>.reference.json)
       task register|unregister                    the logon/idle "re-warm after a driver update" task
-      fetch-codecs                                packaging: download the Oodle/zlib DLLs next to this exe if missing
+      fetch-codecs <dir>                          packaging: the pinned Oodle/zlib DLLs in <dir>, downloaded if missing
     <game> is an id (steam:2909400) or a case-insensitive part of the name.
     """;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;  // game names carry ™ and ®
+RouteFailover.Product = "SCSKiller-CLI";
 if (args.Length == 0 || args[0] is "-h" or "--help" or "help") { Console.WriteLine(Usage); return 0; }
 // The app is handing over to Update.exe, which replaces this folder: start nothing (the scheduled task runs again later).
-if (Busy.Applying(AppStore.DefaultDir, DateTimeOffset.UtcNow)) { Console.Error.WriteLine("an update is being installed; try again in a minute"); return 0; }
+// Packaging never reads the app's data folder.
+if (args[0] != "fetch-codecs" && Busy.Applying(AppStore.DefaultDir, DateTimeOffset.UtcNow))
+{
+    const string busy = "an update is being installed; try again in a minute";
+    Console.Error.WriteLine(busy);
+    // run elevated by the app, the exit code alone (0, for the scheduled task) would read as done
+    try { if (Opt(Elevated.ResultArg) is { } file) Elevated.WriteResult(file, false, busy); }
+    catch (ArgumentException) { }
+    return 0;
+}
 int code;
 try
 {
@@ -64,7 +74,7 @@ try
         "task" => TaskCommand(),
         "nvidia-snapshot" => NvidiaSnapshot(),
         "nvidia-auto-shader" => NvidiaAutoShader(),
-        "fetch-codecs" => FetchCodecs(),
+        "fetch-codecs" => FetchCodecs(args.ElementAtOrDefault(1) ?? throw new ArgumentException("usage: scskiller fetch-codecs <dir>")),
         _ => Fail($"unknown command '{args[0]}'\n{Usage}"),
     };
 }
@@ -112,10 +122,12 @@ static void BackgroundPriority()   // index/plan/materialize run in this process
     self.PriorityClass = ProcessPriorityClass.Idle;
 }
 
+static string StatusName(GameState s) => ScsKiller.NeedsOfflineSession(s) ? "NeedsOfflineSession" : s.Status.ToString();
+
 static string Hms(TimeSpan? t) => t?.ToString(@"h\:mm\:ss") ?? "-";
 
 static void Row(GameState s) =>
-    Console.WriteLine($"{s.Status,-14} {s.Game.Id,-24} {s.Game.Name}{(s.AntiCheat != AntiCheat.None ? $"  [{s.AntiCheat}]" : "")}{(s.KnownStutter is { } ks ? $"  [known stutter: {ks.Severity.ToString().ToLowerInvariant()}]" : "")}{(s.RecorderInstalled ? "  [recorder]" : "")}{(s.CacheOnDisk is { } c ? $"  [cache {Format.Bytes(c)}]" : "")}  - {s.StatusReason}");
+    Console.WriteLine($"{StatusName(s),-19} {s.Game.Id,-24} {s.Game.Name}{(s.AntiCheat != AntiCheat.None ? $"  [{s.AntiCheat}]" : "")}{(s.KnownStutter is { } ks ? $"  [known stutter: {ks.Severity.ToString().ToLowerInvariant()}]" : "")}{(s.NoStutter != null ? "  [no shader stutter]" : "")}{(s.RecorderInstalled ? "  [recorder]" : "")}{(s.CacheOnDisk is { } c ? $"  [cache {Format.Bytes(c)}]" : "")}  - {(ScsKiller.NeverRecorded(s) ? $"{ScsKiller.NothingRecordedTitle}. {s.RecorderRefused}" : s.StatusReason)}");
 
 /// <summary>The tags' <see cref="Format.Middleware"/> lines joined with " · ", with the DLL names when <paramref name="dlls"/>.</summary>
 static string MiddlewareLine(IReadOnlyList<MiddlewareTag> tags, bool dlls) => string.Join(" · ", tags.Select(t =>
@@ -175,21 +187,21 @@ async Task<int> Status(string? query)
           install    {g.Game.InstallDir}
           exe        {g.Game.ExePath}
           runs as    {(rec.LaunchedExeName is { } l0 ? $"{l0} (seen {rec.LaunchedExeSeenAt:yyyy-MM-dd HH:mm})" : "not seen yet")}; warms stage {ScsKiller.WarmExeName(g.Game, rec)}
-          engine     {(g.Engine is { } e ? $"{e.Family} {e.Version} {e.Fork} {e.GraphicsApi}{(e.Encrypted ? " encrypted" : "")}" : "-")}
-          status     {g.Status}: {g.StatusReason}
+          engine     {(g.Engine is { } e ? string.Join(' ', new[] { Format.Engine(e) + (e.VersionGuessed ? " (guessed)" : ""), e.Fork, e.GraphicsApi }.OfType<string>()) + (e.Encrypted ? " encrypted" : "") : "-")}
+          status     {StatusName(g)}: {g.StatusReason}
           anti-cheat {g.AntiCheat}
           shaders    {g.ShaderCount?.ToString() ?? "-"}
           plan       {(g.Plan is { } p ? $"{p.Recorded} recorded + {p.Generated} generated + {p.D3D11Shaders} DirectX 11 shaders + {p.MiddlewareItems} middleware, {p.RootSignatures} root sigs, rule verified: {p.RootSigRuleVerified}" : "-")}
-          stutter    {(g.KnownStutter is { } st ? $"known, {st.Severity.ToString().ToLowerInvariant()}: {st.Reason} ({st.Source}, checked {st.Date})" : "-")}
+          stutter    {(g.KnownStutter is { } st ? $"known, {st.Severity.ToString().ToLowerInvariant()}: {st.Reason} ({st.Source}, checked {st.Date})" : g.NoStutter is { } ns ? $"none: {ns}" : "-")}
           middleware {(g.Middleware is { Count: > 0 } mw ? MiddlewareLine(mw, true) : "-")}
           estimate   {(g.EstimatedCacheBytes is { } est ? Format.Bytes(est) : "-")} of cache, {Hms(g.EstimatedWarmTime)}
           careful    {CarefulLine(g.Careful)}
           warmed     {(g.WarmedAt is { } w ? $"{w:yyyy-MM-dd HH:mm} for driver {g.WarmedDriverVersion} in {Hms(g.LastWarmTime)}" + (ScsKiller.WarmCounts(g.LastWarmFailed ?? 0, g.LastWarmSkipped ?? 0, g.LastWarmCrashed ?? 0) is { } counts ? $"; {counts}" : "") : "never")}
-          cache      {(g.CacheOnDisk is { } c ? $"{Format.Bytes(c)} on disk (driver-cache files its warms or the game had open)" : "-")}
+          cache      {(g.CacheOnDisk is { } c ? $"{Format.Bytes(c)} on disk{(g.CacheInUse is { } u && u < c ? $", {Format.Bytes(u)} in use" : "")} (driver-cache files its warms or the game had open)" : "-")}
           keys       {(rec.CacheKeys.Count > 0 ? string.Join(", ", rec.CacheKeys.Order()) : "-")}{(k.WarmAgs(g.Game.Id) is { } ags ? $" (compiles register its AGS app name {ags.App}, key {k.AgsKey(g.Game.Id)}: the exe name's case doesn't matter)" : AmdAppCache.IsNameHashed(rec.CacheKeys, ScsKiller.WarmExeName(g.Game, rec)) == false ? " (an app profile's key, not the exe name's hash: the name's case doesn't matter)" : "")}
-          recorder   {(g.RecorderInstalled ? "installed" : "not installed")}
+          recorder   {(g.RecorderInstalled ? "installed" : "not installed")}{(g.RecorderRefused is { } why ? $"; {(ScsKiller.NeverRecorded(g) ? ScsKiller.NothingRecordedTitle + ". " : "")}{why}" : "")}
           recording  {(g.RecordingBytes > 0 ? $"{Format.Bytes(g.RecordingBytes)} (the game folder's files and SCSKiller's copy)" : "-")}, limit {ScsKiller.LimitText(k.Settings.RecordingLimitMB)} per game{(g.RecordingPaused ? $"; {ScsKiller.PausedNote(k.Settings)}" : "")}
-          last play  {(g.LastSession is { } l ? $"{Hms(l.Duration)}, {l.Requests} pipelines: {l.FromGameLibrary} from the game's library, {l.CacheHits} cache hits, {l.Compiles} compiles (worst {l.WorstCompileMs:0.0} ms){(l.StartupCompiles > 0 ? $", {l.StartupCompiles} compiles while the game started" : "")}{(l.RayQueryRecompiles > 0 ? $", {l.RayQueryRecompiles} ray-traced pipelines the driver partly recompiles every launch" : "")}{(l.StateObjectsReady + l.StateObjectsCompiled + l.StateObjectsStartupCompiled > 0 ? $"; ray tracing state objects: {l.StateObjectsReady} ready, {l.StateObjectsCompiled} compiled{(l.StateObjectsStartupCompiled > 0 ? $", {l.StateObjectsStartupCompiled} compiled while the game started" : "")}" : "")}" : "-")}
+          last play  {(g.LastSession is { } l ? $"{Hms(l.Duration)}, {l.Requests} pipelines: {l.FromGameLibrary} from the game's library, {l.CacheHits} cache hits, {l.Compiles} compiles (worst {l.WorstCompileMs:0.0} ms){(l.StartupCompiles > 0 ? $", {l.StartupCompiles} compiles while the game started or loaded" : "")}{(l.RayQueryRecompiles > 0 ? $", {l.RayQueryRecompiles} ray-traced pipelines the driver partly recompiles every launch" : "")}{(l.StateObjectsReady + l.StateObjectsCompiled + l.StateObjectsStartupCompiled > 0 ? $"; ray tracing state objects: {l.StateObjectsReady} ready, {l.StateObjectsCompiled} compiled{(l.StateObjectsStartupCompiled > 0 ? $", {l.StateObjectsStartupCompiled} compiled while the game started or loaded" : "")}" : "")}" : "-")}
           1st launch {(rec.FirstLaunch is { } fl ? $"{fl.At.LocalDateTime:yyyy-MM-dd HH:mm}, after the last compile: {fl.Hits} cache hits, {fl.Compiles} compiles ({fl.Compiled * 100:0.0}% compiled)" : "-")}
         """);
     return 0;
@@ -316,7 +328,7 @@ async Task<int> Compile()
     k.Background = args.Contains("--idle");
     if (k.Background || whenIdle) BackgroundPriority();
     var targets = args[1] == "--all-ready"
-        ? k.Games.Where(s => s.Status is GameStatus.Ready or GameStatus.Stale).ToList()
+        ? k.Games.Where(s => s.Status is GameStatus.Ready or GameStatus.Stale && s.NoStutter == null && !s.CompileUnreached).ToList()
         : [Match(k.Games, args[1])];
     if (args.Contains("--careful") || args.Contains("--fast"))
         foreach (var g in targets)
@@ -547,13 +559,14 @@ int TaskCommand()
     }
 }
 
-static int FetchCodecs()
+static int FetchCodecs(string dir)
 {
-    // Packaging (publish.ps1): the pinned DLLs next to this exe, which seed each user's codecs folder (Codecs).
+    // Packaging (publish.ps1): the pinned DLLs in the build's cache, copied next to the exes, where they seed each user's
+    // codecs folder (Codecs)
     try
     {
-        Console.WriteLine(Codecs.Ensure(OodleHelper.OodleFileName, Codecs.DownloadOodle, AppContext.BaseDirectory));
-        Console.WriteLine(Codecs.Ensure(ZlibHelper.DllName, p => ZlibHelper.DownloadDll(p, null!), AppContext.BaseDirectory));
+        Console.WriteLine(Codecs.Ensure(OodleHelper.OodleFileName, Codecs.DownloadOodle, dir));
+        Console.WriteLine(Codecs.Ensure(ZlibHelper.DllName, p => ZlibHelper.DownloadDll(p, null!), dir));
         return 0;
     }
     catch (InvalidDataException e) { return Fail(e.Message); }

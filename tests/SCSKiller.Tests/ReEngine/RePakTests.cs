@@ -196,6 +196,26 @@ public class RePakTests
         Directory.Delete(dir, true);
     }
 
+    /// <summary>A shader file whose first container is DXBC and a later one DXIL (as Resident Evil Village ships SM5 beside
+    /// SM6), with no config.ini: DirectX 12, not "either".</summary>
+    [Fact]
+    public void A_shader_file_with_any_DXIL_is_DirectX_12()
+    {
+        var dir = Temp("reengine-dxil");
+        byte[] part = [.. "DXIL"u8, .. BitConverter.GetBytes(8), .. BitConverter.GetBytes(6 << 16 | 0x60), .. BitConverter.GetBytes(2)];
+        byte[] dxil = [.. "DXBC"u8, .. new byte[16], .. BitConverter.GetBytes(1), .. BitConverter.GetBytes(36 + part.Length), .. BitConverter.GetBytes(1),
+            .. BitConverter.GetBytes(36), .. part];
+        byte[] Sdf(params byte[][] cs) => [.. "SDF\0"u8, .. new byte[200], .. cs.SelectMany(c => c.Concat(new byte[12]))];
+        var game = new Game("test:re-dxil", "RE test", Store.Other, dir, Path.Combine(dir, "game.exe"));
+        var reader = new ReEngineReader(Path.Combine(dir, "data"), Offline);
+
+        File.WriteAllBytes(Path.Combine(dir, "re_chunk_000.pak"), Pak(0, 64, new E(1, Sdf(Hlsl.Vs(1, Hlsl.Rs1), dxil))));
+        Assert.Equal("D3D12", reader.Detect(game)!.GraphicsApi);
+        File.WriteAllBytes(Path.Combine(dir, "re_chunk_000.pak"), Pak(0, 64, new E(1, Sdf(Hlsl.Vs(1, Hlsl.Rs1), Hlsl.Ps(1, Hlsl.Rs1)))));
+        Assert.Equal("D3D11 or D3D12", reader.Detect(game)!.GraphicsApi);   // DXBC only: either
+        Directory.Delete(dir, true);
+    }
+
     static string? Offline(string url) => null;
 
     /// <summary>ree-pak-rs's pak.rs shape (the modulus as a Rust byte array, little endian, 129 bytes; the exponent as a

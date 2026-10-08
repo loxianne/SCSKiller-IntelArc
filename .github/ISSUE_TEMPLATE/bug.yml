@@ -54,5 +54,5 @@ body:
     id: logs
     attributes:
       label: Output or error text
-      description: The error shown, or the output of `scskiller status "<game>"`. Remove anything personal (user names in paths).
+      description: The error shown, or the output of `scskiller status "<game>"`. If SCSKiller closed on its own or didn't start, the end of `crash.log` in `%LOCALAPPDATA%\SCSKiller`. Remove anything personal (user names in paths).
       render: text

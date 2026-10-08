@@ -47,6 +47,12 @@ public sealed partial class QueuePage : Page
         });
     }
 
+    void OnGameClick(object _, ItemClickEventArgs e)
+    {
+        var id = ((QueueRow)e.ClickedItem).Id;
+        if (App.Core.Games.Any(g => g.Game.Id == id)) App.Main.Navigate(typeof(DetailPage), id);   // a finished game may be removed since
+    }
+
     void OnSettings(object _, RoutedEventArgs __) => App.Main.Navigate(typeof(SettingsPage));
     void OnLibrary(object _, RoutedEventArgs __) => App.Main.Navigate(typeof(LibraryPage));
 }

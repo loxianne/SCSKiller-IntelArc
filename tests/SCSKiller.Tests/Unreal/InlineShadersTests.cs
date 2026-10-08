@@ -96,7 +96,6 @@ public class InlineShadersTests(ITestOutputHelper output)
     public void IndexesShadersInsidePackages(string name, string version, string api, string platform)
     {
         if (Installed(name) is not { } game) return;
-        Ff7.Codecs();
         var data = Ff7.TempDir("inline-" + version);
         var key = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCSKiller", "games", game.Id.Replace(':', '_'), "aes.key");
         var gameDir = Path.Combine(data, "games", game.Id.Replace(':', '_'));
@@ -134,7 +133,6 @@ public class InlineShadersTests(ITestOutputHelper output)
     public void LibraryGameMaterialsCarryNoCode()
     {
         if (!Ff7.HasInstall) return;
-        Ff7.Codecs();
         using var provider = new CUE4Parse.FileProvider.DefaultFileProvider(Path.Combine(Ff7.Install, @"End\Content\Paks"), SearchOption.TopDirectoryOnly,
             new CUE4Parse.UE4.Versions.VersionContainer(CUE4Parse.UE4.Versions.EGame.GAME_FinalFantasy7Rebirth), StringComparer.OrdinalIgnoreCase);
         provider.Initialize();
@@ -226,10 +224,10 @@ public class InlineShadersTests(ITestOutputHelper output)
         Assert.Equal(h, Convert.ToHexStringLower(SHA1.HashData(Assert.Single(got))));
     }
 
-    sealed class Log(Action<string> a) : IProgress<string> { public void Report(string value) => a(value); }
+    internal sealed class Log(Action<string> a) : IProgress<string> { public void Report(string value) => a(value); }
 
     /// <summary>A version 7 .pak (4.20 to 4.21: legacy index, 61-byte footer) of uncompressed, unencrypted files.</summary>
-    static void Pak(string path, params (string Name, byte[] Data)[] files)
+    internal static void Pak(string path, params (string Name, byte[] Data)[] files)
     {
         using var f = new BinaryWriter(File.Create(path));
         static void Entry(BinaryWriter w, long offset, long size) // FPakEntry: offset, sizes, compression flags, SHA-1, flags, block size

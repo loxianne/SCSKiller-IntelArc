@@ -24,7 +24,6 @@ public class CoverAllSurvey(Xunit.Abstractions.ITestOutputHelper output)
     {
         var root = Environment.GetEnvironmentVariable("SCSKILLER_COVER_SURVEY");
         if (root == null) return;
-        Ff7.Codecs();
         var only = Environment.GetEnvironmentVariable("SCSKILLER_COVER_SURVEY_GAMES")?.Split(';', StringSplitOptions.RemoveEmptyEntries);
         var logFile = Path.Combine(root, "survey.log");
         void Log(string s) { output.WriteLine(s); File.AppendAllText(logFile, s + Environment.NewLine); }

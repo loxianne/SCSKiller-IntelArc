@@ -11,11 +11,11 @@ using NSec.Cryptography;
 
 namespace SCSKiller.Core.App;
 
-// The update system's pure parts (docs/patreon-and-updates.md §4); Velopack itself lives in the App project.
+// The update system's pure parts. Velopack itself lives in the App project.
 
 /// <summary>A SemVer 2 version, X.Y.Z[-pre][+build] (a leading "v" is accepted: tags). Compares by SemVer precedence:
 /// 1.5.0-alpha.3 &lt; 1.5.0-beta.1 &lt; 1.5.0-internal.1 &lt; 1.5.0 (internal sorts after beta by ASCII, which is why the
-/// internal channel allows downgrades, release-process.md §4.1). Build metadata is ignored.</summary>
+/// internal channel allows downgrades). Build metadata is ignored.</summary>
 public sealed partial record AppVersion(int Major, int Minor, int Patch, string Pre) : IComparable<AppVersion>
 {
     [GeneratedRegex(@"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$")]
@@ -194,7 +194,7 @@ public static class AutoInstall
 public static class UpdateFeeds
 {
     public const string GhRepo = "BlueHeisenberg/SCSKiller";
-    public static readonly Uri Packages = new("https://dl.scskiller.io/");   // alpha/beta/internal packages: VPS route only (hosting.md §3)
+    public static readonly Uri Packages = new("https://dl.scskiller.io/");   // alpha/beta/internal packages: VPS route only
     /// <summary>The app's background check; the Library's refresh and About's "Check for updates" check in between.</summary>
     public static readonly TimeSpan CheckEvery = TimeSpan.FromHours(1);
 
@@ -202,7 +202,10 @@ public static class UpdateFeeds
     /// <see cref="RouteFailover"/> (a URL on its primary route).</summary>
     public static Uri Feed(string channel, string file) => channel == UpdateChannels.Stable
         ? new($"https://github.com/{GhRepo}/releases/latest/download/{file}")
-        : new(RouteFailover.Default.Primary, $"v1/updates/{channel}/{file}");
+        : new(RouteFailover.Default.Primary, EdgePath(channel, file));
+
+    /// <summary>A file of an alpha, beta or internal channel on the edge, relative to a route.</summary>
+    public static string EdgePath(string channel, string file) => $"v1/updates/{channel}/{file}";
 
     /// <summary>A package named by a signed feed: the version's own channel says where it lives (a beta feed also lists
     /// stable releases, §4.1). Its SHA-256 comes from the signed feed, so the host doesn't have to be trusted.</summary>
@@ -386,6 +389,24 @@ public sealed class FeedTrust(AppStore store, IReadOnlyDictionary<string, string
         return DateTimeOffset.TryParse(signedAt, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at)
             ? at : throw new FeedRejectedException("malformed signed_at");
     }
+}
+
+/// <summary>The steps of one Velopack hook, each on its own: one that throws is logged and the ones after it still run, so
+/// an uninstall that can't remove the scheduled task still takes the recorders out of the games.</summary>
+public static class HookSteps
+{
+    public static void Run(string hook, Action<string> log, params Action[] steps)
+    {
+        log(hook);
+        for (var i = 0; i < steps.Length; i++)
+            try { steps[i](); }
+            catch (Exception e) { log($"{hook}: step {i + 1} of {steps.Length} failed, the others ran: {e}"); }
+    }
+
+    /// <summary>The uninstall's steps: the driver-update task and the sign-in entry go, then the recorders come out of the
+    /// games whatever happened to those two. <paramref name="running"/>: the running processes' names, tests only.</summary>
+    public static void Uninstall(AppStore store, Action<string> log, Action unregisterTask, Action removeStartup, IReadOnlySet<string>? running = null) =>
+        Run("Uninstalling", log, unregisterTask, removeStartup, () => ScsKiller.RemoveAllRecorders(store, running));
 }
 
 /// <summary>Never apply an update under a running warm (§4.5 item 3). Every process running a queue item holds

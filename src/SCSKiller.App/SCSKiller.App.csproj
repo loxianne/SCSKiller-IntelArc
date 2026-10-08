@@ -27,7 +27,7 @@
     <!-- Component packages instead of the Microsoft.WindowsAppSDK metapackage, which adds AI/ML/Widgets/Search (+60 MB). -->
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="$(WinAppSdkRuntimeVersion)" />
-    <!-- installer and updater (docs/installer.md, patreon-and-updates.md §4.2): per-user install, deltas, channels -->
+    <!-- installer and updater: per-user install, deltas, channels -->
     <PackageReference Include="Velopack" Version="1.2.158" />
   </ItemGroup>
 

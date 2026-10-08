@@ -9,8 +9,8 @@ namespace SCSKiller.Core.App;
 /// larger set is read each time.</summary>
 public static class KeyFiles
 {
-    /// <summary>About 200 MB of key strings. Settable for tests: the bound changes what is read again, never a result.</summary>
-    public static long MaxKeys { get; internal set; } = 2_000_000;
+    /// <summary>About 30 MB of key strings (126 B a key). Settable for tests: the bound changes what is read again, never a result.</summary>
+    public static long MaxKeys { get; internal set; } = 250_000;
     const int Sample = 4096;
 
     sealed class Entry(string stamp, HashSet<string> keys)
@@ -89,12 +89,15 @@ public static class KeyFiles
     {
         lock (gate)
         {
-            if (cache.Count == 0 || Environment.TickCount64 - lastUse < idle.TotalMilliseconds) return false;
+            if (cache.Count == 0 || !Idle(lastUse, Environment.TickCount64, idle)) return false;
             cache.Clear();
             count = 0;
             return true;
         }
     }
+
+    /// <summary>The cache was last asked for at <paramref name="lastUse"/> and it is <paramref name="now"/> (milliseconds).</summary>
+    internal static bool Idle(long lastUse, long now, TimeSpan idle) => now - lastUse >= idle.TotalMilliseconds;
 
     /// <summary>A file written here: its cached sets (every variant) are read again.</summary>
     public static void Forget(string path)

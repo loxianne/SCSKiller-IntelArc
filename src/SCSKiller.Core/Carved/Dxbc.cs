@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 
 namespace SCSKiller.Core.Carved;
 
-/// <summary>DXBC/DXIL container checks for carving raw game files (port of tools/engine_survey.py parse_container): header,
+/// <summary>DXBC/DXIL container checks for carving raw game files: header,
 /// chunk table inside the container, FourCC chunk names. Layout: "DXBC", 16-byte checksum, u32 1, u32 size, u32 chunk count,
 /// u32 chunk offsets; each chunk = FourCC, u32 length, data.</summary>
 public static class Dxbc

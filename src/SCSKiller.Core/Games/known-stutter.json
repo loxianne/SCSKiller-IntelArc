@@ -1,5 +1,5 @@
 {
-  "about": "Games with documented shader-compilation stutter, seeded from docs/scs-unfixed.md (verdict 'SCS still present') and docs/scs-priorities.md (severe, sourced). Only entries with a real source: an https link, or \"SCSKiller measurement\" for SCSKiller's own. ids are Game.Id values (steam:<appid>, xbox:<package family>, epic:<app name>, ea:<content id>); name is the fallback, compared letters and digits only, case-insensitive. date = when the entry was last checked. Embedded in the app and served at /v1/content/known-stutter.json, the same file; the app uses the served copy when it passes StutterList.TryParse.",
+  "about": "Games with documented shader-compilation stutter. Only entries with a real source: an https link, or \"SCSKiller measurement\" for SCSKiller's own. ids are Game.Id values (steam:<appid>, xbox:<package family>, epic:<app name>, ea:<content id>); name is the fallback, compared letters and digits only, case-insensitive. date = when the entry was last checked. Embedded in the app and served at /v1/content/known-stutter.json, the same file; the app uses the served copy when it passes StutterList.TryParse.",
   "games": [
     {
       "name": "STAR WARS Jedi: Survivor",

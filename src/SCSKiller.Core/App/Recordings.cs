@@ -11,6 +11,80 @@ namespace SCSKiller.Core.App;
 public static class Recordings
 {
     public const string KeysFile = "scskiller.keys";
+    public const string WarmedFile = "scskiller.warmed";
+
+    /// <summary>The files the app writes next to the recorder, with the temp names their writes go through.</summary>
+    public static readonly string[] AppFiles = [KeysFile, WarmedFile, KeysFile + ".tmp", WarmedFile + ".tmp"];
+
+    /// <summary>Written by each warm process next to its log (proxy.cpp warm_main): the record keys ('P' records' for plan
+    /// items) of the items it didn't create: failed, abandoned, or skipped for having removed the device before.</summary>
+    public const string FailedFile = "scskiller_failed.keys";
+
+    // proxy.cpp load_warmed: magic, u32 n, n record keys, then tuple hashes
+    static ReadOnlySpan<byte> WarmedMagic => "SCSKWRM1"u8;
+
+    /// <summary>The <see cref="WarmedFile"/> of a compile's work folder dbs (the warm's scskiller.db and scskiller_gen.db):
+    /// the sorted keys of the pipelines and state objects it created, then the sorted (stages + root signature) tuple hashes
+    /// of every pipeline it created, a plan item's from its template with the item's shaders and root signature, as the
+    /// proxy's rec_tuple does. What the materialize skipped isn't in the dbs; an item one of <paramref name="failed"/>
+    /// (<see cref="FailedFile"/>s) names, by its record's key, wasn't created and counts for nothing.</summary>
+    public static byte[] Warmed(IEnumerable<string> dbs, IEnumerable<string> failed)
+    {
+        var notCreated = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in failed.Where(File.Exists))
+            foreach (var k in File.ReadAllBytes(f).Chunk(20).Where(c => c.Length == 20)) notCreated.Add(Convert.ToHexStringLower(k));
+        var keys = new SortedSet<string>(StringComparer.Ordinal);
+        var tuples = new SortedSet<string>(StringComparer.Ordinal);
+        var templates = new Dictionary<string, Rec>();
+        var items = new List<byte[]>();
+        foreach (var db in dbs.Where(File.Exists))
+            foreach (var r in Read(db))
+            {
+                if (r.Tag is 'G' or 'C' or 'S') templates[r.Key] = r;   // a plan item's template even when it failed itself
+                if (notCreated.Contains(r.Key)) continue;
+                if (r.Tag is 'G' or 'C' or 'S')
+                {
+                    keys.Add(r.Key);
+                    if (TryParse(r) is { } p) tuples.Add(TupleHash(p.Rs, p.Stages));
+                }
+                else if (IsStateObject(r.Tag)) keys.Add(r.Key);
+                else if (r.Tag == 'P') items.Add(r.Payload);
+            }
+        foreach (var item in items)
+        {
+            var (template, rs, stages) = ParseItem(item);
+            if (!templates.TryGetValue(template, out var t) || TryParse(t) is not { } p) continue;   // the proxy skips it too
+            var merged = new SortedDictionary<int, string>(p.Stages);
+            foreach (var (s, h) in stages)
+                if (h != Zero && (merged.ContainsKey(s) || t.Tag == 'G' && s is >= 1 and <= 5)) merged[s] = h;
+            tuples.Add(TupleHash(rs != Zero ? rs : p.Rs, merged));
+        }
+        using var m = new MemoryStream();
+        m.Write(WarmedMagic);
+        m.Write(BitConverter.GetBytes((uint)keys.Count));
+        foreach (var k in keys.Concat(tuples)) m.Write(Convert.FromHexString(k));
+        return m.ToArray();
+
+        static Pso? TryParse(Rec r)
+        {
+            try { return Parse(r); }
+            catch (Exception e) when (e is InvalidDataException or ArgumentException or KeyNotFoundException or IndexOutOfRangeException or OverflowException) { return null; }
+        }
+    }
+
+    /// <summary>proxy.cpp tuple_hash: SHA-1 of the root signature hash, then per stage (by subobject type) its type byte and
+    /// shader hash.</summary>
+    public static string TupleHash(string rs, IReadOnlyDictionary<int, string> stages)
+    {
+        using var m = new MemoryStream();
+        m.Write(Convert.FromHexString(rs));
+        foreach (var (s, h) in stages.OrderBy(x => x.Key).ThenBy(x => x.Value, StringComparer.Ordinal))
+        {
+            m.WriteByte((byte)s);
+            m.Write(Convert.FromHexString(h));
+        }
+        return Hex(System.Security.Cryptography.SHA1.HashData(m.ToArray()));
+    }
 
     /// <summary>Held around a read-modify-write of <paramref name="store"/> (import, compaction, migration, clearing) by every
     /// process: two writers would each replace the file with their own merge and drop the other's records. Every writer
@@ -64,10 +138,10 @@ public static class Recordings
             if (hasStore) foreach (var r in Read(store)) if (seen.Add(Id(r))) yield return r;
             if (hasInbox)
                 foreach (var r in Read(inbox!))
-                    if (seen.Add(Id(r)))
+                    if (Id(r) is var id && seen.Add(id))
                     {
                         if (r.Tag == 'N') nv = true;
-                        else if (r.Tag is not ('B' or 'W')) added.Add(r.Key);
+                        else if (r.Tag is not ('B' or 'W')) added.Add(id);   // its key: one string for both sets
                         yield return r;
                     }
         }
@@ -93,17 +167,15 @@ public static class Recordings
     public static int WriteKeys(string store, IReadOnlySet<string>? shipped, string path, bool nameShipped = true, Func<bool>? publish = null)
     {
         var blobs = new HashSet<string>(nameShipped && shipped != null ? shipped : []);
-        var records = new List<Rec>();
-        foreach (var r in File.Exists(store) ? Read(store) : [])
-            if (r.Tag == 'B') blobs.Add(Hex(r.Payload.AsSpan(0, 20)));
-            else records.Add(r);
-        var keep = records.Where(r => r.Tag == 'N' || Rehydrate.References([r]).All(h => blobs.Contains(h) || shipped?.Contains(h) == true)).ToList();
-        if (publish?.Invoke() == false) return records.Count - keep.Count;   // nothing created or deleted
-        if (blobs.Count + keep.Count == 0)
-        {
-            File.Delete(path);
-            return records.Count;
-        }
+        var stored = File.Exists(store);
+        if (stored)
+            foreach (var r in Read(store))
+                if (r.Tag == 'B') blobs.Add(Hex(r.Payload.AsSpan(0, 20)));
+        // read again, one record at a time: 1.5 million records held at once took 1.3 GB
+        IEnumerable<Rec> Records() => stored ? Read(store).Where(r => r.Tag != 'B') : [];
+        bool Kept(Rec r) => r.Tag == 'N' || Rehydrate.References([r]).All(h => blobs.Contains(h) || shipped?.Contains(h) == true);
+        if (publish?.Invoke() == false) return Records().Count(r => !Kept(r));   // nothing created or deleted
+        var (kept, left) = (0, 0);
         var tmp = path + ".tmp";
         try
         {
@@ -111,13 +183,26 @@ public static class Recordings
             {
                 f.Write(KeysMagic);
                 foreach (var h in blobs) f.Write(Convert.FromHexString(h));
-                foreach (var r in keep) f.Write(Convert.FromHexString(r.Key));
+                foreach (var r in Records())
+                    if (!Kept(r)) left++;
+                    else
+                    {
+                        f.Write(Convert.FromHexString(r.Key));
+                        kept++;
+                    }
             }
-            BeforeKeysPublished?.Invoke();
-            if (publish?.Invoke() != false) File.Move(tmp, path, true);
+            if (blobs.Count + kept == 0)
+            {
+                if (publish?.Invoke() != false) File.Delete(path);
+            }
+            else
+            {
+                BeforeKeysPublished?.Invoke();
+                if (publish?.Invoke() != false) File.Move(tmp, path, true);
+            }
         }
         finally { File.Delete(tmp); }
-        return records.Count - keep.Count;
+        return left;
     }
 
     /// <summary>The records of <paramref name="store"/> a layer wrapping the device (a mod) made, by its 'W' records: the
@@ -147,12 +232,12 @@ public static class Recordings
             f.Position = 0;
             // a proxy db starts with a record's tag, never 0: a leading 0 is a compact recording's magic, whole or damaged
             if (n > 0 && head[0] == 0 && !head.AsSpan(0, n).SequenceEqual("\0SCSKREC"u8)) throw new IncompleteLayerList($"{p}: a damaged compact header");
-            IEnumerable<Rec> records;
-            try { records = n > 0 && head[0] == 0 ? [.. Read(p)] : [.. Whole(new BufferedStream(f, 1 << 20), f.Length, p)]; }
+            List<Rec> pairs;   // only the 'W' records kept: a whole recording read at once took over 1 GB
+            try { pairs = [.. (n > 0 && head[0] == 0 ? Read(p) : Whole(new BufferedStream(f, 1 << 20), f.Length, p)).Where(r => r.Tag == 'W')]; }
             catch (InvalidDataException e) { throw new IncompleteLayerList($"{p}: {e.Message}"); }
-            if (records.Where(r => r.Tag == 'W').Select(r => r.Payload.Length).FirstOrDefault(n => n != 40, 40) is not 40 and var bad)
+            if (pairs.Select(r => r.Payload.Length).FirstOrDefault(n => n != 40, 40) is not 40 and var bad)
                 throw new IncompleteLayerList($"{p}: a 'W' record of {bad} bytes");
-            return [.. records.Where(r => r.Tag == 'W').Select(r => Hex(r.Payload))];
+            return [.. pairs.Select(r => Hex(r.Payload))];
         }, "layer", failOpen: false);
 
     /// <summary>A proxy db's records, all of them: a torn tail throws, where <see cref="Read(Stream)"/> stops quietly.</summary>
@@ -173,11 +258,11 @@ public static class Recordings
 
     static readonly object DiskGate = new();
     static (string Fingerprint, HashSet<string> Keys)? onDisk;
-    static readonly Dictionary<string, (long Length, long Written, string[] Inboxes)> InboxesOf = [];
+    static readonly Dictionary<string, (string? Stamp, string[] Inboxes)> InboxesOf = [];
 
     /// <summary>What a layer made by every recording on this PC, read from disk (not from the scan's games, which a
     /// first scan publishes only once evaluated): every games\*\recording.db, and the recorder's inbox (scskiller.db)
-    /// next to each recorded exe in state.json. One enumeration and a stat per file on each call; the set is rebuilt
+    /// next to each recorded exe in state.json. Files are stamped by metadata and sampled contents; the set is rebuilt
     /// only when one of them changed. Anything there that can't be listed, stat'ed or read throws (a recording not whole
     /// yet: <see cref="IncompleteLayerList"/>): what is shared is checked against it.</summary>
     public static HashSet<string> LayerMadeOnDisk(string dataDir)
@@ -188,18 +273,18 @@ public static class Recordings
         catch (DirectoryNotFoundException) { return []; }   // only a missing folder is none: Exists is false on an error too
         var sources = new List<string>();
         var fingerprint = new System.Text.StringBuilder();
-        void Add(string path, long length, long written) { sources.Add(path); fingerprint.Append(path).Append('|').Append(length).Append('|').Append(written).Append('\n'); }
+        void Add(string path, long length, long written) { sources.Add(path); fingerprint.Append(path).Append('|').Append(length).Append('|').Append(written).Append('|').Append(KeyFiles.Stamp(path, strict: true)).Append('\n'); }
         foreach (var dir in dirs)
             foreach (var f in dir.EnumerateFiles())
                 if (f.Name.Equals("recording.db", StringComparison.OrdinalIgnoreCase)) Add(f.FullName, f.Length, f.LastWriteTimeUtc.Ticks);
                 else if (f.Name.Equals("state.json", StringComparison.OrdinalIgnoreCase))
                 {
-                    fingerprint.Append(f.FullName).Append('|').Append(f.Length).Append('|').Append(f.LastWriteTimeUtc.Ticks).Append('\n');
+                    fingerprint.Append(f.FullName).Append('|').Append(KeyFiles.Stamp(f.FullName, strict: true)).Append('\n');
                     foreach (var inbox in Inboxes(f))
                         if (Stat(inbox) is { } st) Add(inbox, st.Length, st.Written);
                 }
         var fp = fingerprint.ToString();
-        // unchanged sizes and write times: the files hold what was read, so their keys stand even if a read would now fail
+        // unchanged stamps (KeyFiles.Keys' own): the files hold what was read, so their keys stand even if a read would now fail
         lock (DiskGate)
             if (onDisk is { } c && c.Fingerprint == fp) return [.. c.Keys];
         HashSet<string> keys = [];
@@ -212,8 +297,9 @@ public static class Recordings
     /// again only when the file changed.</summary>
     static string[] Inboxes(FileInfo state)
     {
+        var stamp = KeyFiles.Stamp(state.FullName, strict: true);
         lock (DiskGate)
-            if (InboxesOf.TryGetValue(state.FullName, out var c) && (c.Length, c.Written) == (state.Length, state.LastWriteTimeUtc.Ticks)) return c.Inboxes;
+            if (InboxesOf.TryGetValue(state.FullName, out var c) && c.Stamp == stamp) return c.Inboxes;
         using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(state.FullName));
         string[] inboxes = [.. new[] { "RecorderExe", "RecorderMoveFrom", "RecorderMoveTo" }
             .Select(n => !doc.RootElement.TryGetProperty(n, out var exe) ? null : exe.ValueKind switch
@@ -223,7 +309,7 @@ public static class Recordings
                 _ => throw new InvalidDataException($"{state.FullName}: {n} is a {exe.ValueKind}, not a path"),
             })
             .OfType<string>().Where(p => p.Length > 0).Select(p => Path.Combine(Path.GetDirectoryName(p)!, "scskiller.db"))];
-        lock (DiskGate) InboxesOf[state.FullName] = (state.Length, state.LastWriteTimeUtc.Ticks, inboxes);
+        lock (DiskGate) InboxesOf[state.FullName] = (stamp, inboxes);
         return inboxes;
     }
 

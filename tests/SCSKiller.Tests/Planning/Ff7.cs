@@ -43,19 +43,6 @@ static class Ff7
     /// <summary>The NVIDIA machine's FF7 recording: the dump's, else the rehydrated copy.</summary>
     public static string RecordingDb => HasDump ? DumpRecordingDb : RehydratedDb;
 
-    /// <summary>Oodle / zlib-ng next to the test binaries (the app ships them next to its exe), copied from the dev tree
-    /// so CUE4Parse doesn't download them.</summary>
-    public static void Codecs()
-    {
-        lock (Main) // test classes run in parallel
-            foreach (var dll in new[] { "oodle-data-shared.dll", "zlib-ng2.dll" })
-            {
-                var src = Path.Combine(Main, @"tools\ueshaders\bin\Release\net10.0", dll);
-                var dst = Path.Combine(AppContext.BaseDirectory, dll);
-                if (File.Exists(src) && !File.Exists(dst)) File.Copy(src, dst);
-            }
-    }
-
     static ShaderIndex? index, gsIndex;
     static readonly Lock gate = new();
     static (UnrealReader Reader, EngineInfo Engine, ShaderIndex Index)? installed;
@@ -67,7 +54,6 @@ static class Ff7
         lock (gate)
         {
             if (installed is { } i) return i;
-            Codecs();
             var reader = new UnrealReader(TempDir("ff7-install-data"));
             var engine = reader.Detect(Game) ?? throw new InvalidOperationException($"{Install}: not detected");
             installed = (reader, engine, reader.Index(Game, engine, null, CancellationToken.None));
@@ -75,7 +61,7 @@ static class Ff7
         }
     }
 
-    /// <summary>The FF7 index as the old ueshaders tool dumped it (what the Python reference was run on): the dump's, else
+    /// <summary>The FF7 index as the old index dumper wrote it (what the Python reference was run on): the dump's, else
     /// the install's without what the old tool didn't dump (geometry shaders' input primitive; see <see cref="GsIndex"/>).</summary>
     public static ShaderIndex Index()
     {
@@ -110,7 +96,7 @@ static class Ff7
     /// <summary>Shader bytes by SHA-1: the bytecode dump, else the install.</summary>
     public static IEngineReader Shaders() => HasDump ? new BytecodeDir(Path.Combine(Out, "bytecode")) : new InstallShaders();
 
-    /// <summary>A folder with bytecode.jsonl + shaders.jsonl for gen/generate.py: the dump, else <see cref="Index"/> written in
+    /// <summary>A folder with bytecode.jsonl + shaders.jsonl for the Python reference: the dump, else <see cref="Index"/> written in
     /// the old tool's format (no bytecode\: the reference is run without writing blobs).</summary>
     public static string JsonlDir()
     {

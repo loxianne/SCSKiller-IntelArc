@@ -289,6 +289,58 @@ public class DiscoveryAndVendorTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Nvidia_in_use_bytes_come_from_the_header_else_from_where_the_zero_tail_starts()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "scsk-nv-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string Nvph(string name, int length, ReadOnlySpan<byte> magic, long used)
+        {
+            var b = new byte[length];
+            magic.CopyTo(b);
+            if (length >= 16) BitConverter.TryWriteBytes(b.AsSpan(8), used);
+            var path = Path.Combine(dir, name);
+            File.WriteAllBytes(path, b);
+            return path;
+        }
+        long? Used(string path) => NvidiaAppCache.UsedBytes(new FileInfo(path), 64);
+        try
+        {
+            var valid = Nvph("0002a91d11111111.nvph", 4096, "nvph"u8, 1000);
+            Assert.Equal(1000, Used(valid));
+            Assert.Equal(4096, Used(Nvph("32e6a91d11111111.nvph", 4096, "nvph"u8, 4096)));      // full
+            // not a plausible header: the data ends in the first 64-byte block, the rest is the zero tail
+            Assert.Equal(64, Used(Nvph("7e55a91d22222222.nvph", 4096, "nvph"u8, 1L << 50)));   // past the end
+            Assert.Equal(64, Used(Nvph("7e55a91d33333333.nvph", 4096, "nvph"u8, -5)));
+            Assert.Equal(64, Used(Nvph("0002a91d44444444.nvph", 4096, "xxxx"u8, 1000)));        // not the magic
+            Assert.Equal(64, Used(Nvph("0002a91d55555555.nvph", 4096, "nvph"u8, 0)));
+            Assert.Equal(10, Used(Nvph("0002a91d66666666.nvph", 10, "nvph"u8, 0)));             // truncated
+            Assert.Equal(0, Used(Nvph("0002a91d77777777.nvph", 0, [], 0)));
+            Assert.Equal(0, Used(Nvph("0002a91d99999999.nvph", 4096, [], 0)));                 // all zero
+
+            // the driver's own handle (any sharing that lets a reader in) doesn't stop the read, and the read doesn't
+            // stop the driver writing or deleting meanwhile
+            using (var driver = new FileStream(valid, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+                Assert.Equal(1000, Used(valid));
+            using (var driver = new FileStream(valid, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new FileStream(valid, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                driver.Write(new byte[16]);   // our sharing lets the writer go on
+                driver.Flush();
+                Assert.Equal(0, Used(valid));   // its header now reads as zero, and so does the rest
+            }
+            // locked exclusively by another handle: not known, no exception; the sum counts it whole
+            var locked = Nvph("0002a91d88888888.nvph", 8192, "nvph"u8, 3000);
+            var cache = new NvidiaAppCache(dir);
+            using (new FileStream(locked, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                Assert.Equal((null, 8192L), (Used(locked), cache.UsedOf(["88888888"])));
+            Assert.Equal(3000, Used(locked));
+            Assert.Equal((8192L, 3000L), (cache.SizeOf(["88888888"]), cache.UsedOf(["88888888"])));
+            Assert.Equal((8192L, 4096L), (cache.SizeOf(["11111111"]), cache.UsedOf(["11111111"])));   // an empty file and a full one
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void Amd_cache_file_names_map_to_app_keys()
     {
         // FNV-1a-32 of the UTF-16LE exe name, case-sensitive: keys observed in DxcCache on AMD
@@ -359,7 +411,7 @@ public class DiscoveryAndVendorTests(ITestOutputHelper output)
         if (games.Count == 0) return;   // this machine's Xbox app has no games (or C:/D:\XboxGames don't exist)
 
         // Atomfall's config declares Launcher/Atomfall.exe as Id="Game", an API-picking launcher stub (the "launch" helper
-        // hint rejects it); the real D3D12 exe is Atomfall_dx12.exe (docs/engine-survey.md). Each title is checked only
+        // hint rejects it); the real D3D12 exe is Atomfall_dx12.exe. Each title is checked only
         // where it is installed.
         if (games.SingleOrDefault(g => g.Name == "Atomfall") is { } atomfall)
         {
@@ -497,6 +549,39 @@ public class DiscoveryAndVendorTests(ITestOutputHelper output)
             Assert.Equal(Path.Combine(root, "game.exe"), GameFiles.FindExe(root));
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    /// <summary>A Ubisoft+ build beside the game's exe (Valhalla's, at their real sizes): the plain exe, though smaller.</summary>
+    [Fact]
+    public void Exe_discovery_takes_the_exe_beside_a_ubisoft_plus_build_whatever_the_sizes()
+    {
+        var root = Directory.CreateTempSubdirectory("scskiller-plus-test-").FullName;
+        try
+        {
+            void Put(string name, long size)
+            {
+                using var f = File.Create(Path.Combine(root, name));
+                f.SetLength(size);
+            }
+            Put("ACValhalla.exe", 544_294_936);
+            Put("ACValhalla_Plus.exe", 601_040_408);
+            Assert.Equal(Path.Combine(root, "ACValhalla.exe"), GameFiles.FindExe(root));
+            File.Delete(Path.Combine(root, "ACValhalla.exe"));
+            Assert.Equal(Path.Combine(root, "ACValhalla_Plus.exe"), GameFiles.FindExe(root));   // no plain build beside it
+            File.Delete(Path.Combine(root, "ACValhalla_Plus.exe"));
+            Put("game.exe", 100);
+            Put("GAME_PLUS.EXE", 200);
+            Assert.Equal(Path.Combine(root, "game.exe"), GameFiles.FindExe(root));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void A_folder_name_comes_from_a_path_ending_in_either_separator()
+    {
+        Assert.Equal("Assassin's Creed Valhalla", GameFiles.FolderName("C:/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Assassin's Creed Valhalla/"));
+        Assert.Equal("Valhalla", GameFiles.FolderName(@"D:\Games\Valhalla\"));
+        Assert.Equal("Valhalla", GameFiles.FolderName(@"D:\Games\Valhalla"));
     }
 
     [Fact]
@@ -675,6 +760,20 @@ public class DiscoveryAndVendorTests(ITestOutputHelper output)
             Assert.Equal(stub, xbox.ExePath);   // what the config names
             Assert.Equal(gdk, GameFiles.GameExe(xbox.InstallDir, xbox.ExePath));
             Assert.Equal(gdk, GameFiles.FindExe(content));   // the manual add and the stores without a configured exe
+
+            // a Shipping build the config marks dev-only or for another device family is never the game; others are
+            var dev = Unreal(@"Excluded\Content");
+            var devStub = Put(@"Excluded\Content", "Game.exe", 100);
+            Put(@"Excluded\Content\Game\Binaries\WinGDK", "Game-WinGDK-Shipping.exe", 4096);
+            Put(@"Excluded\Content\Console\Binaries\WinGDK", "Console-WinGDK-Shipping.exe", 4096);
+            File.WriteAllText(Path.Combine(dev, "MicrosoftGame.config"), """<Game><Identity Name="Pub.Excluded" Version="1.0.0.0"/><ExecutableList><Executable Name="Game.exe" TargetDeviceFamily="PC"/>"""
+                + """<Executable Name="Game\Binaries\WinGDK\Game-WinGDK-Shipping.exe" IsDevOnly="true"/>"""
+                + """<Executable Name="Console\Binaries\WinGDK\Console-WinGDK-Shipping.exe" TargetDeviceFamily="Scarlett"/></ExecutableList></Game>""");
+            Assert.Equal(devStub, GameFiles.GameExe(dev, devStub));
+            Assert.Equal(devStub, GameFiles.FindExe(dev, devStub));   // nor in the scan after the Shipping lookup
+            Assert.Equal(devStub, GameFiles.FindExe(dev));
+            var pc = Put(@"Excluded\Content\Pc\Binaries\WinGDK", "Game-WinGDK-Shipping.exe", 4096);   // not in the config: the game's
+            Assert.Equal(pc, GameFiles.GameExe(dev, devStub));
 
             // Steam's Win64 layout, with a launcher a launch option names, Engine's helpers, a 32-bit build and a patcher's copy
             var steam = Unreal(@"steamapps\common\Game");
@@ -861,6 +960,27 @@ public class DiscoveryAndVendorTests(ITestOutputHelper output)
             Assert.Equal(AntiCheat.Other, GameFiles.DetectAntiCheat(Install("warframe", "Warframe.x64.exe")));
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    /// <summary>A Blizzard game installed by Battle.net but listed by another store, or added by hand, has no battlenet: id:
+    /// Battle.net's own files in its folder mark it.</summary>
+    [Theory]
+    [InlineData(".build.info")]
+    [InlineData(".product.db")]
+    public void BattleNet_install_files_mark_a_game_listed_elsewhere(string marker)
+    {
+        var dir = Directory.CreateTempSubdirectory("scskiller-anticheat-test-").FullName;
+        try
+        {
+            var exe = Path.Combine(dir, "_retail_", "Game.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(exe)!);
+            File.WriteAllBytes(exe, [0]);
+            var game = new Game("steam:1", "Blizzard game", Store.Steam, dir, exe);
+            Assert.Equal(AntiCheat.None, GameFiles.DetectAntiCheat(game));
+            File.WriteAllText(Path.Combine(dir, marker), "");
+            Assert.Equal(AntiCheat.Other, GameFiles.DetectAntiCheat(game));
+        }
+        finally { Directory.Delete(dir, true); }
     }
 
     /// <summary>War Thunder's standalone layout: BattlEye sits in the root, the exe in win64, which is the folder suggested.</summary>

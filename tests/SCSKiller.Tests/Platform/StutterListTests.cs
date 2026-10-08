@@ -54,17 +54,6 @@ public class StutterListTests : IDisposable
     }
 
     [Fact]
-    public void Embedded_list_is_the_same_bytes_the_server_serves()
-    {
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
-        while (!File.Exists(Path.Combine(root.FullName, "SCSKiller.slnx"))) root = root.Parent!;
-        var served = Path.Combine(root.FullName, "server-rs", "content", "known-stutter.json");
-        if (!Directory.Exists(Path.Combine(root.FullName, "server-rs"))) return;   // the public source has no server-rs/
-        Assert.Equal(File.ReadAllBytes(Path.Combine(root.FullName, "src", "SCSKiller.Core", "Games", "known-stutter.json")),
-                     File.ReadAllBytes(served));
-    }
-
-    [Fact]
     public void TryParse_reads_a_replacement_list()
     {
         var list = StutterList.TryParse(One(_ => { }))!;

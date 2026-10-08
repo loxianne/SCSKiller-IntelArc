@@ -10,7 +10,7 @@
 //          scskiller_frames.bin (frame_hooks).
 // Input:   scskiller.keys (optional, record mode): what the app already imported, never recorded again, and the shaders
 //          the game ships, recorded by hash only (load_keys).
-// Input:   scskiller_gen.db (optional): generated plan from gen/, replayed by warm on top of the db.
+// Input:   scskiller_gen.db (optional): generated plan, replayed by warm on top of the db.
 //
 // db record: u8 tag, u32 len, payload.  'B' blob = sha1[20] + bytes (shader container or root sig).
 // 'G' CreateGraphicsPipelineState, 'C' CreateComputePipelineState, 'S' CreatePipelineState stream.
@@ -44,9 +44,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <deque>
+#include <format>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -109,6 +111,8 @@ static std::vector<std::string> g_plan;                          // warm mode on
 static std::vector<std::string> g_items11;                       // warm mode only: '1' and '2' payloads (D3D11 items; 24 / 40 bytes)
 static HashSet g_known_tuples;                                   // (stages + root sig) tuples known at launch
 static uint64_t g_lib_loads, g_db_records_at_start, g_creates, g_known_hits, g_tuple_hits, g_slow_known, g_slow_tuple, g_slow_unknown, g_unsupported;
+static uint64_t g_repeats, g_slow_repeats;  // creates of a desc this process created before, and those over the slow mark
+static HashSet g_created;                    // every key this process created (note)
 static std::atomic<uint64_t> g_warm_ok, g_warm_fail, g_warm_crash;  // crash: skipped, it removed the device in an earlier run
 static std::atomic<uint64_t> g_warm_other;                       // items of another pass: counted done, never created
 static uint64_t warm_done() { return g_warm_ok + g_warm_fail + g_warm_crash + g_warm_other; }
@@ -214,7 +218,7 @@ static const wchar_t* const kAntiCheatMarkers[] = {  // GameFiles.Markers; "*x":
     L"RiotClientUxRender.exe",
     L"NeacClient.exe", L"NeacSafe64.sys", L"NeacSafe64_ex.sys",
     L"BlackCall.aes", L"BlackCall64.aes", L"BlackCat64.sys", L"HShield", L"PunkBuster", L"PnkBstrA.exe", L"pbsvc.exe", L"pbsv.dll",
-    L"equ8_conf.json", L"Warframe.x64.exe", L"gameguard.des", L"DenuvoAC", L"denuvo-anti-cheat.sys", L"denuvo-anti-cheat-runtime.dll",
+    L"equ8_conf.json", L".build.info", L".product.db", L"Warframe.x64.exe", L"gameguard.des", L"DenuvoAC", L"denuvo-anti-cheat.sys", L"denuvo-anti-cheat-runtime.dll",
     L"denuvo-anti-cheat-update-service.exe", L"Denuvo Anti-Cheat Installer.exe", L"*.xem", L"*_BE.exe"};
 static const size_t kEasyAntiCheatMarkers = 5;  // the list's first entries
 static std::atomic<int> g_admission;  // 0 undecided, 1 records, -1 pass-through
@@ -948,7 +952,7 @@ static std::vector<Hash> so_deps(const std::string& payload, char tag) {
     return deps;
 }
 
-// scskiller.db: what the game created (append-only). scskiller_gen.db (optional, read-only, written by gen/):
+// scskiller.db: what the game created (append-only). scskiller_gen.db (optional, read-only, the materialized plan):
 // 'B' blobs + 'P' plan items = template PSO key[20], root sig[20], u32 n, n x (u32 stage, hash[20]),
 // then u32 0xFFFFFFFF (keep the template's input layout) or a canonical input layout.
 static void put(char tag, const void* a, size_t an, const void* b = nullptr, size_t bn = 0) {
@@ -1108,7 +1112,7 @@ static void load_file(const std::wstring& path, bool main, bool with_bytes) {
     for (;;) {
         int tag = fgetc(f);
         uint32_t len;
-        if (tag == EOF || fread(&len, 4, 1, f) != 1) break;
+        if (tag == EOF || !tag || fread(&len, 4, 1, f) != 1) break;  // no record has tag 0: a zero-filled tail after a power loss
         if (tag == 'B') {
             Hash h;
             if (len < 20 || fread(h.data(), 1, 20, f) != 20) break;
@@ -1165,6 +1169,28 @@ static void load_file(const std::wstring& path, bool main, bool with_bytes) {
 static std::vector<Hash> g_imported;
 static bool imported(const Hash& h) { return std::binary_search(g_imported.begin(), g_imported.end(), h); }
 static bool fresh(HashSet& s, const Hash& h) { return !imported(h) && s.insert(h).second; }
+// scskiller.warmed (record mode, written by the app after a complete compile): "SCSKWRM1", u32 n, then n sorted 20-byte
+// keys of the pipelines and state objects the compile replayed, then sorted (stages + root sig) tuple hashes
+// (tuple_hash) of every pipeline it compiled, planner-made ones included. With it, the csv's known / tuple_known and the
+// log's counters mean "the last compile created this", not "this PC recorded it".
+static std::vector<Hash> g_warmed, g_warmed_tuples;
+static bool g_has_warmed;
+static void load_warmed(const std::wstring& path) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return;
+    char magic[8];
+    uint32_t n = 0;
+    long long len = _filelengthi64(_fileno(f));
+    if (len >= 12 && fread(magic, 1, 8, f) == 8 && !memcmp(magic, "SCSKWRM1", 8) && fread(&n, 4, 1, f) == 1 && 12 + 20ll * n <= len) {
+        g_warmed.resize(n), g_warmed_tuples.resize((size_t)(len - 12 - 20ll * n) / 20);
+        g_has_warmed = fread(g_warmed.data(), 20, n, f) == n && fread(g_warmed_tuples.data(), 20, g_warmed_tuples.size(), f) == g_warmed_tuples.size();
+        std::sort(g_warmed.begin(), g_warmed.end()), std::sort(g_warmed_tuples.begin(), g_warmed_tuples.end());
+    }
+    fclose(f);
+    if (g_has_warmed) logf("db: the last compile created %zu pipelines and %zu shader tuples (scskiller.warmed): known means compiled", g_warmed.size(), g_warmed_tuples.size());
+    else g_warmed.clear(), g_warmed_tuples.clear();
+}
+
 static size_t load_keys(const std::wstring& path) {
     FILE* f = _wfopen(path.c_str(), L"rb");
     if (!f) return 0;
@@ -1186,6 +1212,7 @@ static void load_db(bool with_bytes) {
     if (!g_db) logf("db: scskiller.db is open in another process: nothing is recorded in this one");
     load_file(g_dir + L"scskiller.db", true, with_bytes);
     if (size_t n = with_bytes ? 0 : load_keys(g_dir + L"scskiller.keys")) logf("db: %zu keys of records and blobs imported earlier or shipped with the game", n);
+    if (!with_bytes) load_warmed(g_dir + L"scskiller.warmed");
     g_db_records_at_start = g_keys.size();
     size_t rec_tuples = g_known_tuples.size();
     load_file(g_dir + L"scskiller_gen.db", false, with_bytes);
@@ -1248,7 +1275,13 @@ static void note(Writer& w, double ms, bool lib, double pre_ms) {
     }
     Hash k = key_of(w.tag, w.s);
     bool so = w.tag == 'R' || w.tag == 'A';
-    bool known = g_known.count(k) || imported(k), tknown = known || (!so && g_known_tuples.count(tuple_hash(w.rsh, w.tup)));
+    bool known, tknown;
+    if (g_has_warmed) {
+        known = std::binary_search(g_warmed.begin(), g_warmed.end(), k);
+        tknown = known || (!so && std::binary_search(g_warmed_tuples.begin(), g_warmed_tuples.end(), tuple_hash(w.rsh, w.tup)));
+    } else known = g_known.count(k) || imported(k), tknown = known || (!so && g_known_tuples.count(tuple_hash(w.rsh, w.tup)));
+    // the same desc created again in this process: a driver that keeps its cache serves it at hit cost
+    bool repeat = !g_created.insert(k).second;
     store(w, k);
     if (w.nv.slot != ~0u || w.nv.opts) {
         if (++g_nv_creates <= 5)
@@ -1258,6 +1291,7 @@ static void note(Writer& w, double ms, bool lib, double pre_ms) {
     const double slow = 3.0;  // ms; a PSO cache hit is well under this, a compile well over (a cached state object isn't: ARCHITECTURE.md)
     g_known_hits += known, g_tuple_hits += tknown;
     (known ? g_slow_known : tknown ? g_slow_tuple : g_slow_unknown) += ms > slow;
+    g_repeats += repeat, g_slow_repeats += repeat && ms > slow;
     if (g_csv) {  // key: the PSO key (sha1 of tag + payload, as the db's record); proxy_ms: the hook's own time, outside ms
         double own = pre_ms + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - n0).count();
         fprintf(g_csv, "%.1f,%c,%d,%d,%.3f,%s,%.3f,%lu,%d\n", t_ret, lib ? w.tag | 0x20 : w.tag, (int)known, (int)tknown, ms, hex(k).data(), own,
@@ -1265,8 +1299,8 @@ static void note(Writer& w, double ms, bool lib, double pre_ms) {
     }
     if (g_csv) fflush(g_csv);  // a crash or hard exit must not lose the timings
     if (g_creates % 500 == 0) {
-        logf("creates=%llu (library loads %llu) known=%llu tuple_known=%llu | slow: known=%llu tuple_only=%llu unknown=%llu | unsupported=%llu db=%zu nvapi_state=%llu",
-             g_creates, g_lib_loads, g_known_hits, g_tuple_hits, g_slow_known, g_slow_tuple, g_slow_unknown, g_unsupported, g_keys.size(), g_nv_creates);
+        logf("creates=%llu (library loads %llu) known=%llu tuple_known=%llu | slow: known=%llu tuple_only=%llu unknown=%llu | repeats=%llu slow=%llu | unsupported=%llu db=%zu nvapi_state=%llu",
+             g_creates, g_lib_loads, g_known_hits, g_tuple_hits, g_slow_known, g_slow_tuple, g_slow_unknown, g_repeats, g_slow_repeats, g_unsupported, g_keys.size(), g_nv_creates);
     }
 }
 
@@ -1953,6 +1987,13 @@ static void warm_main() {
     }
     t11.join();
     if (times) fclose(times);
+    // what this process didn't create (failed, abandoned, skipped as a crash), by record key ('P' for a plan item): the app
+    // leaves them out of scskiller.warmed
+    if (FILE* f = _wfopen((g_dir + L"scskiller_failed.keys").c_str(), L"wb")) {
+        for (size_t j = 0; j < g_item_state.size(); ++j)
+            if (g_item_state[j] == 2 || g_crash.count(j)) fwrite(key(j).data(), 1, 20, f);
+        fclose(f);
+    }
     for (auto& h : crash_found) g_crash_json += (g_crash_json.empty() ? "\"" : ",\"") + std::string(hex(h).data()) + "\"";
     for (size_t j : g_alone_next) g_alone_json += (g_alone_json.empty() ? "" : ",") + std::to_string(j);
     if (g_warm_faults >= 3) logf("warm: stopped after repeated faults; the game is unaffected, report scskiller.log");
@@ -2064,10 +2105,11 @@ static HRESULT STDMETHODCALLTYPE hk_stream(ID3D12Device2* dev, const D3D12_PIPEL
 
 // A created state object's identity -> its record key, so records that build on it (links, additions) can name it.
 static void remember_so(const Writer& w, HRESULT hr, void** pp) {
-    if (FAILED(hr) || !pp || !*pp || !w.ok || w.s.empty()) return;
+    if (FAILED(hr) || !pp || !*pp) return;
     if (auto* so = so_id((IUnknown*)*pp)) {
         std::lock_guard l(g_mx);
-        g_so_key[so] = key_of(w.tag, w.s);
+        if (w.ok && !w.s.empty()) g_so_key[so] = key_of(w.tag, w.s);
+        else g_so_key.erase(so);  // a released object's key at this address would name the wrong base
     }
 }
 static HRESULT STDMETHODCALLTYPE hk_cso(ID3D12Device5* dev, const D3D12_STATE_OBJECT_DESC* d, REFIID riid, void** pp) {
@@ -2189,13 +2231,19 @@ static size_t insn_len(const uint8_t* p) {
     return n + (mod == 1 ? 1 : mod == 2 ? 4 : 0) + imm;
 }
 
+// Every inline hook (NVAPI, Aftermath) and the relay pages they share go through this lock: two device-creating threads
+// may install at once. Recursive: an installer holds it across its own hook_fn calls.
+static std::recursive_mutex g_hook_mx;
+
 static void* hook_fn(void* target, void* hook, void** orig) {
+    std::lock_guard l(g_hook_mx);
     static uint8_t *page, *end;
     auto t = (uint8_t*)target;
     size_t n = 0;
     for (size_t l = 1; n < 5 && l; n += l) l = insn_len(t + n);
     if (n < 5 || ((uintptr_t)t & 7)) return nullptr;
-    if (!page || end - page < 64) {  // relays and trampolines within a rel32 jmp of the target
+    auto near_t = [&](const uint8_t* q) { long long d = q - (t + 5); return d > -0x7FF00000ll && d < 0x7FF00000ll; };
+    if (!page || end - page < 64 || !near_t(page)) {  // relays and trampolines within a rel32 jmp of the target (another module's may be far)
         SYSTEM_INFO si;
         GetSystemInfo(&si);
         uintptr_t g = si.dwAllocationGranularity, base = (uintptr_t)t & ~(g - 1);
@@ -2227,6 +2275,36 @@ static void* hook_fn(void* target, void* hook, void** orig) {
     return tramp;
 }
 
+// NVIDIA Aftermath: with GPU crash dumps on, DX12_Initialize's GenerateShaderDebugInfo (0x8) makes the driver compile
+// every pipeline under another cache key (selftest-measured), so a warm without it never reaches the game. Logged once each.
+static int (*o_am_init)(int, uint32_t, void*);
+static int (*o_am_dumps)(int, uint32_t, uint32_t, void*, void*, void*, void*, void*);
+static int hk_am_init(int version, uint32_t flags, void* dev) {
+    int r = o_am_init(version, flags, dev);
+    logf("aftermath: DX12_Initialize(version 0x%x, feature flags 0x%x) = 0x%x%s", version, flags, r, flags & 8 ? ": shader debug info (another driver cache key while crash dumps are on)" : "");
+    return r;
+}
+static int hk_am_dumps(int version, uint32_t apis, uint32_t flags, void* dump, void* debug_info, void* desc, void* marker, void* user) {
+    int r = o_am_dumps(version, apis, flags, dump, debug_info, desc, marker, user);
+    logf("aftermath: EnableGpuCrashDumps(version 0x%x, apis 0x%x, flags 0x%x, shader debug info callback %s) = 0x%x", version, apis, flags, debug_info ? "set" : "none", r);
+    return r;
+}
+static void hook_aftermath() {
+    HMODULE m = GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll");
+    std::lock_guard l(g_hook_mx);   // a second device's thread waits until the first has installed (or failed) these
+    static bool done;
+    if (!m || done) return;
+    done = true;
+    auto at = [&](const char* name, void* hook, void** orig) {
+        auto p = (uint8_t*)GetProcAddress(m, name);
+        for (int i = 0; p && p[0] == 0xE9 && i < 4; ++i) { int32_t r; memcpy(&r, p + 1, 4); p += 5 + r; }  // an export that is a jmp thunk
+        return p && hook_fn(p, hook, orig) ? "hooked" : "not hooked";
+    };
+    const char* a = at("GFSDK_Aftermath_EnableGpuCrashDumps", (void*)hk_am_dumps, (void**)&o_am_dumps);
+    const char* b = at("GFSDK_Aftermath_DX12_Initialize", (void*)hk_am_init, (void**)&o_am_init);
+    logf("aftermath: EnableGpuCrashDumps %s, DX12_Initialize %s", a, b);
+}
+
 struct NvPsoExt { uint32_t base_version, extension, version, slot, space; };  // NVAPI_D3D12_PSO_SET_SHADER_EXTENSION_SLOT_DESC_V1
 static int (*o_nv_slot)(IUnknown*, uint32_t, uint32_t);
 static int (*o_nv_slot_thread)(IUnknown*, uint32_t, uint32_t);
@@ -2247,9 +2325,22 @@ static int hk_nv_slot_thread(IUnknown* dev, uint32_t slot, uint32_t space) {
     if (!st) t_nv.slot = slot, t_nv.space = space;
     return st;
 }
-static int hk_nv_opts(ID3D12Device5* dev, const uint32_t* p) {  // NVAPI_D3D12_SET_CREATE_PIPELINE_STATE_OPTIONS_PARAMS_V1 {version, flags}
+static int hk_nv_opts(ID3D12Device5* dev, const uint32_t* p) {  // NVAPI_D3D12_SET_CREATE_PIPELINE_STATE_OPTIONS_PARAMS {version, flags, ...}
     int st = o_nv_opts(dev, p);
-    if (!st && p && p[0] == (8 | 1 << 16)) t_nv.opts = p[1];
+    // version = struct size | version << 16: every version so far starts with {version, flags}; the warm sets them as V1.
+    // flags are read only from a struct the driver accepted and whose size holds them
+    bool flags = !st && p && (p[0] & 0xFFFF) >= 8;
+    if (flags) t_nv.opts = p[1];
+    static std::mutex mx;
+    static std::set<std::tuple<uint32_t, uint32_t, int>> seen;
+    std::tuple<uint32_t, uint32_t, int> call{p ? p[0] : 0, flags ? p[1] : 0, st};
+    bool fresh;
+    {
+        std::lock_guard l(mx);
+        fresh = seen.insert(call).second;
+    }
+    if (fresh) logf("nvapi: SetCreatePipelineStateOptions(struct version 0x%08x, flags %s) = %d", std::get<0>(call),
+                    flags ? ("0x" + std::format("{:x}", std::get<1>(call))).c_str() : "not read", st);
     return st;
 }
 static void nv_pso_ext(Writer& w, uint32_t n, const NvPsoExt* const* e) {
@@ -2289,6 +2380,7 @@ static void nv_hooks() {
     HMODULE m = LoadLibraryW(L"nvapi64.dll");  // NVIDIA only; the game may load it later, the same module then
     auto qi = m ? (void* (*)(uint32_t))GetProcAddress(m, "nvapi_QueryInterface") : nullptr;
     if (!qi) return;
+    std::lock_guard l(g_hook_mx);
     struct { uint32_t id; void* hook; void** orig; const char* name; } fns[] = {
         {0xAC2DFEB5, (void*)hk_nv_slot, (void**)&o_nv_slot, "SetNvShaderExtnSlotSpace"},
         {0x43D867C0, (void*)hk_nv_slot_thread, (void**)&o_nv_slot_thread, "SetNvShaderExtnSlotSpaceLocalThread"},
@@ -2742,10 +2834,35 @@ static ID3D12Device* unwrapped(IUnknown* unk) {
 }
 
 // Every device the game gets, however it asked for one: the hooks, once per vtable.
+// Once per device: what besides the PSO desc could change what the driver compiles (experimental features, device flags,
+// NVIDIA Aftermath, whose shader debug info and error reporting change the compiled code).
+static void log_device(IUnknown* unk) {
+    std::string feats;
+    ID3D12DeviceConfiguration* cfg = nullptr;  // Agility SDK 1.610 and later
+    if (SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&cfg)))) {
+        auto d = cfg->GetDesc();
+        GUID g[16];
+        if (d.NumEnabledExperimentalFeatures && d.NumEnabledExperimentalFeatures <= std::size(g) && SUCCEEDED(cfg->GetEnabledExperimentalFeatures(g, d.NumEnabledExperimentalFeatures)))
+            for (UINT i = 0; i < d.NumEnabledExperimentalFeatures; ++i) {
+                char b[40];
+                snprintf(b, sizeof b, " %08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X", g[i].Data1, g[i].Data2, g[i].Data3, g[i].Data4[0], g[i].Data4[1],
+                         g[i].Data4[2], g[i].Data4[3], g[i].Data4[4], g[i].Data4[5], g[i].Data4[6], g[i].Data4[7]);
+                feats += b;
+            }
+        char b[96];
+        snprintf(b, sizeof b, "SDK %u, flags 0x%x, %u experimental features", d.SDKVersion, d.Flags, d.NumEnabledExperimentalFeatures);
+        feats = b + feats;
+        cfg->Release();
+    } else feats = "no device configuration (a runtime before Agility 1.610)";
+    logf("device: %s; NVIDIA Aftermath %s", feats.c_str(), GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll") ? "loaded" : "not loaded");
+    hook_aftermath();   // a game initializes it on the device it just created
+}
+
 static HRESULT device_created(HRESULT hr, IUnknown* adapter, D3D_FEATURE_LEVEL fl, void** pp) {
     if (FAILED(hr) || !pp || !*pp || !admitted()) return hr;
     pin_self();
     install_hooks((IUnknown*)*pp);
+    log_device((IUnknown*)*pp);
     if (g_next) {
         auto create = (decltype(&D3D12CreateDevice))GetProcAddress(g_real, "D3D12CreateDevice");
         ID3D12Device* dev = nullptr;

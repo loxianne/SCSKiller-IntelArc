@@ -191,7 +191,6 @@ public class CoverAllTests(ITestOutputHelper output)
     {
         var game = new SCSKiller.Core.Games.SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:1636440");
         if (game == null) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("cover-townfall-data"));
         var engine = reader.Detect(game)!;
         if (Ff7.Recording(game, engine, reader, "cover-townfall-rec") is not { } db) return;
@@ -225,7 +224,6 @@ public class CoverAllTests(ITestOutputHelper output)
         var game = new SCSKiller.Core.Games.SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:1636440");
         var csv = game == null ? "" : Path.Combine(Path.GetDirectoryName(game.ExePath)!, "scskiller_creates.csv");
         if (!File.Exists(csv)) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("rq-townfall-data"));
         var engine = reader.Detect(game!)!;
         if (Ff7.Recording(game!, engine, reader, "rq-townfall-rec") is not { } db) return;

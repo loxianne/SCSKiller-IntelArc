@@ -60,6 +60,7 @@ public partial class AppTests
     [Fact]
     public async Task The_proxy_admits_only_the_process_the_app_started_for_an_offline_session()
     {
+        UseLiveLedger();
         if (OwnWarmExe() is not { } warm) return;
         var bin = Path.GetDirectoryName(warm)!;
         var dir = Path.Combine(_root, "offline");
@@ -113,6 +114,7 @@ public partial class AppTests
     [Fact]
     public async Task An_offline_session_records_and_leaves_the_folder_as_it_was_when_its_process_exits()
     {
+        UseLiveLedger();
         EasyAntiCheatBeside();
         if (OfflineKiller() is not { } k) return;
         await Listed(async () =>
@@ -155,6 +157,7 @@ public partial class AppTests
     [InlineData(false)]
     public async Task An_offline_session_left_behind_is_cleaned_up_by_the_helper_or_the_next_start(bool helper)
     {
+        UseLiveLedger();
         EasyAntiCheatBeside();
         if (OfflineKiller() is not { } k) return;
         await Listed(async () =>
@@ -350,6 +353,7 @@ public partial class AppTests
     [Fact]
     public async Task An_update_and_an_offline_session_exclude_each_other()
     {
+        UseLiveLedger();
         EasyAntiCheatBeside();
         if (OfflineKiller() is not { } k) return;
         await Listed(async () =>
@@ -399,6 +403,7 @@ public partial class AppTests
     [Fact]
     public async Task An_offline_session_whose_cleanup_helper_cannot_start_is_refused()
     {
+        UseLiveLedger();
         EasyAntiCheatBeside();
         if (OfflineKiller() is not { } k) return;
         await Listed(async () =>
@@ -424,6 +429,7 @@ public partial class AppTests
     [Fact]
     public async Task An_offline_session_runs_beside_a_dinput8_mod_loader_and_leaves_it()
     {
+        UseLiveLedger();
         EasyAntiCheatBeside();
         var loader = Planning.MiddlewarePackTests.Pe("dinput8.dll", Guid.NewGuid().ToByteArray());
         File.WriteAllBytes(Path.Combine(_exeDir, "dinput8.dll"), loader);
@@ -449,6 +455,7 @@ public partial class AppTests
     [InlineData(ScsKiller.ChainName)]
     public async Task An_offline_session_beside_a_d3d12_mod_is_refused_naming_it(string name)
     {
+        UseLiveLedger();
         EasyAntiCheatBeside();
         if (OfflineKiller() is not { } k) return;
         var mod = Planning.MiddlewarePackTests.Pe("d3d12.dll", Guid.NewGuid().ToByteArray());

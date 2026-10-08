@@ -19,7 +19,6 @@ public class ShippedPipelineCacheSurvey(Xunit.Abstractions.ITestOutputHelper out
     {
         var root = Environment.GetEnvironmentVariable("SCSKILLER_PIPELINE_CACHE_SURVEY");
         if (root == null) return;
-        Ff7.Codecs();
         var only = Environment.GetEnvironmentVariable("SCSKILLER_PIPELINE_CACHE_GAMES")?.Split(';', StringSplitOptions.RemoveEmptyEntries);
         void Log(string s) { output.WriteLine(s); File.AppendAllText(Path.Combine(root, "survey.log"), s + Environment.NewLine); }
         var reader = new UnrealReader(Path.Combine(root, "data"));

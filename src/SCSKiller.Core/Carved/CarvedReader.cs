@@ -10,7 +10,7 @@ using SCSKiller.Core.Unreal;
 namespace SCSKiller.Core.Carved;
 
 /// <summary>Any engine that ships raw DXBC/DXIL containers in its files (measured: Starfield, Cyberpunk 2077, Resonance,
-/// Gears of War: Reloaded, Sea of Thieves; docs/engine-survey.md). Carve, validate (<see cref="Dxbc"/>), reflect
+/// Gears of War: Reloaded, Sea of Thieves). Carve, validate (<see cref="Dxbc"/>), reflect
 /// (<see cref="ShaderContainer"/>). No per-game code:
 ///   - files: shader/PSO-named ones first, whole; the others, sampled (head/middle/tail), only while fewer than
 ///     <see cref="MinGraphics"/> graphics shaders are found (Index carves a sampled file whole once its sample holds shaders);
@@ -19,7 +19,8 @@ namespace SCSKiller.Core.Carved;
 ///     IsPipeline map per record;
 ///   - root signatures: a shader's RTS0 part, served as the game's RTS0-only container with that part when it ships one
 ///     (Starfield ships one per root signature), else as the first shader carrying it (CreateRootSignature takes any
-///     container with an RTS0 part). Games whose shaders carry them plan without a recording (Version "…+RTS0").
+///     container with an RTS0 part). Games whose shaders carry them plan without a recording (Version "…+RTS0"), as do
+///     those whose pipeline records name them (Dawn, <see cref="DawnStores"/>: each record an IsPipeline map).
 /// EngineInfo: Family "Carved", Version "DXIL" / "DXBC" / "DXIL+DXBC" [+ "+RTS0"].</summary>
 public sealed class CarvedReader : IEngineReader
 {
@@ -63,7 +64,7 @@ public sealed class CarvedReader : IEngineReader
         var programs = seen.Count;
         notes = $"{read / 1e6:F0} MB read; " + string.Join("; ", perFile.OrderByDescending(p => p.Value).Take(3)
             .Select(p => $"{Path.GetRelativePath(game.InstallDir, p.Key)}: {p.Value}"));
-        var version = (dxil == programs ? "DXIL" : dxil == 0 ? "DXBC" : "DXIL+DXBC") + (programs > 0 && rts0 >= 0.9 * programs ? EmbeddedRootSignatures : "");
+        var version = (dxil == programs ? "DXIL" : dxil == 0 ? "DXBC" : "DXIL+DXBC") + (programs > 0 && (rts0 >= 0.9 * programs || DawnStores.Read(game.InstallDir) != null) ? EmbeddedRootSignatures : "");
         const string packed = "compressed or packed: needs an engine reader";
         var unsupported = graphics >= MinGraphics ? null
             : programs == 0 ? $"no raw DXBC/DXIL shaders in its files ({read / 1e9:F1} GB sampled): shaders are {packed}"
@@ -102,17 +103,25 @@ public sealed class CarvedReader : IEngineReader
         }, () => graphics >= MinGraphics, ct);
 
         rootSigs.Apply(shaders);
+        var dawn = DawnStores.Read(game.InstallDir);
+        var dawnFile = dawn == null ? null : perFile.Keys.FirstOrDefault(p => string.Equals(Path.GetFullPath(p), Path.GetFullPath(dawn.ShaderFile), StringComparison.OrdinalIgnoreCase));
+        var dawnNote = "";
+        var dawnRuns = dawnFile == null ? null : DawnRuns(dawn!, perFile[dawnFile], shaders, locs, out dawnNote);
 
         var maps = new List<ShaderMap>();
         var mapHashes = new HashSet<string>();
         int records = 0;
         using var content = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        void Stamp(string path)
+        {
+            var f = new FileInfo(path);
+            content.AppendData(Encoding.UTF8.GetBytes($"{Path.GetRelativePath(game.InstallDir, path)}|{f.Length}|{f.LastWriteTimeUtc.Ticks}\n"));
+        }
         foreach (var (path, seq) in perFile)
         {
-            var file = new FileInfo(path);
             var rel = Path.GetRelativePath(game.InstallDir, path);
-            content.AppendData(Encoding.UTF8.GetBytes($"{rel}|{file.Length}|{file.LastWriteTimeUtc.Ticks}\n"));
-            if (Records(seq) is { } runs)
+            Stamp(path);
+            if ((path == dawnFile ? dawnRuns : Records(seq)) is { } runs)
                 foreach (var run in runs)
                 {
                     records++;
@@ -123,6 +132,7 @@ public sealed class CarvedReader : IEngineReader
                 foreach (var pool in seq.Where(s => shaders.ContainsKey(s.Sha)).Select(s => s.Sha).Distinct().GroupBy(PlatformOf))
                     maps.Add(new ShaderMap(Sha1Hex(pool.Key == Platform ? rel : $"{rel}|{pool.Key}"), rel, pool.Key, pool.ToList()));
         }
+        if (dawnRuns != null) { Stamp(dawn!.RootFile); Stamp(dawn.PsoFile); }
         string PlatformOf(string sha) => platformOf.GetValueOrDefault(sha, Platform);
         located[game.Id] = locs;
 
@@ -130,7 +140,7 @@ public sealed class CarvedReader : IEngineReader
         log?.Report($"{perFile.Count} files with shaders, {read / 1e9:F2} GB read: {shaders.Count} shaders ("
             + string.Join(", ", shaders.Values.GroupBy(s => s.Stage).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()} {g.Key}"))
             + $"){(bad > 0 ? $", {bad} unparseable" : "")}, {rs} embedded root signatures, {records} pipeline records -> {maps.Count} maps ({maps.Count(m => m.IsPipeline)} exact)"
-            + string.Concat(platformOf.Values.GroupBy(p => p).Select(g => $"; {g.Count()} need {g.Key}, not planned for 32-lane GPUs")) + $" ({sw.Elapsed.TotalSeconds:F1}s)");
+            + string.Concat(platformOf.Values.GroupBy(p => p).Select(g => $"; {g.Count()} need {g.Key}, not planned for 32-lane GPUs")) + dawnNote + $" ({sw.Elapsed.TotalSeconds:F1}s)");
         return new ShaderIndex(Convert.ToHexStringLower(content.GetHashAndReset()), [Platform, .. platformOf.Values.Distinct().Order(StringComparer.Ordinal)], shaders, maps);
     }
 
@@ -153,6 +163,35 @@ public sealed class CarvedReader : IEngineReader
                 if (RandomAccess.Read(h, b, at.Offset) == b.Length && Convert.ToHexStringLower(SHA1.HashData(b)) == sha) sink(sha, b);
             }
         }
+    }
+
+    /// <summary>Dawn's pipeline records (<see cref="DawnStores"/>) over the shaders carved from its rawshader.store2: each
+    /// record whose shaders were all indexed, as a run. A shader gets the root signature of its records, none when they use
+    /// several: a stage set takes the first root signature among its stages, so the record's other stage gives it its own,
+    /// where a majority pick on a VS would override its PS's. A record of such shaders only plans nothing. The root-signature
+    /// containers are located for ReadShaders (the carver stops before rawroot.store2).</summary>
+    static List<List<string>> DawnRuns(DawnStores.Stores dawn, List<(long Off, int Size, int Kind, string Sha)> seq,
+        Dictionary<string, ShaderInfo> shaders, Dictionary<string, Loc> locs, out string note)
+    {
+        var shaAt = new Dictionary<long, string>();
+        foreach (var s in seq) shaAt.TryAdd(s.Off, s.Sha);
+        var runs = new List<List<string>>();
+        var rootsOf = new Dictionary<string, HashSet<string>>();
+        var unindexed = 0;
+        foreach (var (root, ids) in dawn.Pipelines)
+        {
+            var run = ids.Select(id => shaAt.GetValueOrDefault(dawn.Shaders[id])).OfType<string>().Where(shaders.ContainsKey).ToList();
+            if (run.Count < ids.Length) { unindexed++; continue; }
+            foreach (var h in run) (rootsOf.TryGetValue(h, out var set) ? set : rootsOf[h] = []).Add(dawn.Roots[root].Sha);
+            runs.Add(run);
+        }
+        foreach (var (h, set) in rootsOf) shaders[h] = shaders[h] with { RootSignature = set.Count == 1 ? set.First() : null };
+        foreach (var r in dawn.Roots.Values) locs.TryAdd(r.Sha, new Loc(dawn.RootFile, r.Offset, r.Size));
+        var several = rootsOf.Where(r => r.Value.Count > 1).Select(r => r.Key).ToHashSet();
+        note = $"; Dawn: {runs.Count} pipeline records, {rootsOf.Count - several.Count} shaders given their root signature"
+            + (several.Count > 0 ? $", {several.Count} used with several left without ({runs.Count(r => r.All(several.Contains))} records of only those plan nothing)" : "")
+            + (unindexed + dawn.Skipped > 0 ? $"; left out: {unindexed} records with a shader not indexed, {dawn.Skipped} naming another stage" : "");
+        return runs;
     }
 
     /// <summary>Runs of containers stored back to back (at most <see cref="MaxRecordGap"/> bytes apart; root-signature-only
@@ -307,7 +346,7 @@ public sealed class CarvedReader : IEngineReader
     static readonly Dictionary<string, string> ApiDlls = new(StringComparer.OrdinalIgnoreCase)
         { ["d3d12.dll"] = "D3D12", ["d3d11.dll"] = "D3D11", ["vulkan-1.dll"] = "Vulkan" };
 
-    /// <summary>Middleware that imports a graphics API without being the renderer (engine_survey.py NOT_RENDERER).</summary>
+    /// <summary>Middleware that imports a graphics API without being the renderer.</summary>
     static readonly string[] Middleware = ["eossdk", "libxess", "dstorage", "gfsdk", "nvngx", "sl.", "amd_", "ffx", "nvlowlatency", "galaxy",
         "steam_api", "discord", "overlay", "igxess", "renderdoc", "reshade", "dxgi", "d3d1", "d3d9", "opengl32", "vulkan-1", "libegl", "libglesv2",
         "vk_swiftshader", "d3dcompiler", "dxcompiler", "dxil", "cef", "nvapi", "nvtt", "physx", "bink", "xess", "fsr", "dlss", "streamline",
@@ -332,11 +371,18 @@ public sealed class CarvedReader : IEngineReader
         return apis;
     }
 
-    /// <summary>Import + delay-import DLL names; <paramref name="agility"/>: exports D3D12SDKVersion.</summary>
-    public static List<string> PeImports(string path, out bool agility)
+    /// <summary>Import + delay-import DLL names (<paramref name="delayed"/> false: imports only); <paramref name="agility"/>: exports D3D12SDKVersion.</summary>
+    public static List<string> PeImports(string path, out bool agility, bool delayed = true)
     {
         using var pe = new PEReader(File.OpenRead(path));
-        var h = pe.PEHeaders.PEHeader ?? throw new BadImageFormatException(path);
+        var dlls = PeImports(pe, delayed);
+        agility = PeFile.ExportNames(pe).Take(20000).Contains("D3D12SDKVersion");
+        return dlls;
+    }
+
+    public static List<string> PeImports(PEReader pe, bool delayed)
+    {
+        var h = pe.PEHeaders.PEHeader ?? throw new BadImageFormatException("no optional header");
         var dlls = new List<string>();
         void Table(DirectoryEntry d, int stride, int nameAt, bool delay)
         {
@@ -352,8 +398,7 @@ public sealed class CarvedReader : IEngineReader
             }
         }
         Table(h.ImportTableDirectory, 20, 12, false);
-        Table(h.DelayImportTableDirectory, 32, 4, true);
-        agility = PeFile.ExportNames(pe).Take(20000).Contains("D3D12SDKVersion");
+        if (delayed) Table(h.DelayImportTableDirectory, 32, 4, true);
         return dlls;
     }
 }

@@ -255,6 +255,21 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         Assert.Equal(new[] { Sha(a), Sha(rs), Sha(runtime), Cs(rs, a).Key, nv.Key, Cs(rs, runtime).Key }.Order(), named.Order());
     }
 
+    /// <summary>A keys write with nothing to name deletes the file only if the publish check still holds once the recording
+    /// was read: the game started meanwhile leaves it as it is.</summary>
+    [Fact]
+    public void A_keys_write_with_nothing_to_name_deletes_nothing_once_the_game_started()
+    {
+        var (store, keys) = (Path.Combine(_dir, "recording.db"), Path.Combine(_dir, Recordings.KeysFile));
+        File.WriteAllText(keys, "the last write's");
+        var checks = 0;
+        Assert.Equal(0, Recordings.WriteKeys(store, null, keys, publish: () => ++checks == 1));
+        Assert.Equal(2, checks);
+        Assert.Equal("the last write's", File.ReadAllText(keys));
+        Assert.Equal(0, Recordings.WriteKeys(store, null, keys, publish: () => true));
+        Assert.False(File.Exists(keys));
+    }
+
     /// <summary>With the index's shaders in the keys file, a first session names a shipped shader by hash only and keeps the
     /// bytes of one in no file of the game; the import and the install give every record its shaders back. Without an index
     /// there's no keys file and every shader is recorded whole; a shader a later index no longer has is recorded again.</summary>
@@ -304,7 +319,6 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         var game = new IGameSource[] { new Core.Games.SteamSource(), new Core.Games.EaSource(), new Core.Games.XboxSource() }
             .SelectMany(s => s.Discover()).FirstOrDefault(g => g.Id == id);
         if (game == null) return;
-        Ff7.Codecs();
         var name = "keys-" + id.Split(':')[0];
         var data = Ff7.TempDir(name + "-data");
         string? made = null;
@@ -395,6 +409,9 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         var bytes = File.ReadAllBytes(db);
         bytes[7] ^= 0x20;   // "\0SCSKREc"
         File.WriteAllBytes(db, bytes);
+        // same size, and often the same write time as the first write (the clock ticks every ~15 ms), which the cache
+        // would take for unchanged: a real rewrite comes later
+        File.SetLastWriteTimeUtc(db, File.GetLastWriteTimeUtc(db).AddSeconds(1));
         Assert.Throws<Recordings.IncompleteLayerList>(() => Recordings.LayerMadeOnDisk(data));
         File.Delete(db);
 
@@ -416,6 +433,43 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         packs.Exclude([driver.Key]);
         File.AppendAllText(Path.Combine(packs.Dir, "layer-made.keys"), "not a key\r\n");
         Assert.Throws<InvalidDataException>(() => packs.LayerMade());
+    }
+
+    /// <summary>A recording.db or a state.json rewritten at the same size and with its write time put back is read again.</summary>
+    [Fact]
+    public void A_source_rewritten_with_its_size_and_write_time_kept_is_read_again()
+    {
+        var data = Path.Combine(_dir, "data");
+        var store = new AppStore(data);
+        var first = Directory.CreateDirectory(Path.Combine(_dir, "first")).FullName;
+        var other = Directory.CreateDirectory(Path.Combine(_dir, "other")).FullName;
+        var (_, driver, own, session) = Layered();
+        File.Move(Raw("first.db", W(own, null)), Path.Combine(first, "scskiller.db"));
+        File.Move(Raw("other.db", W(driver, null)), Path.Combine(other, "scskiller.db"));
+        var state = Path.Combine(Directory.CreateDirectory(store.GameDir("test:a")).FullName, "state.json");
+        var before = System.Text.Json.JsonSerializer.Serialize(new { RecorderExe = Path.Combine(first, "game.exe") });
+        var after = System.Text.Json.JsonSerializer.Serialize(new { RecorderExe = Path.Combine(other, "game.exe") });
+        Assert.Equal(before.Length, after.Length);
+        File.WriteAllText(state, before);
+        Assert.Equal([own.Key], Recordings.LayerMadeOnDisk(data));
+        Rewrite(state, () => File.WriteAllText(state, after));
+        Assert.Equal([driver.Key], Recordings.LayerMadeOnDisk(data));
+
+        File.Delete(state);
+        var db = Path.Combine(store.GameDir("test:a"), "recording.db");
+        PsoDb.WriteCompact(db, session);
+        Assert.Contains(driver.Key, Recordings.LayerMadeOnDisk(data));
+        var bytes = File.ReadAllBytes(db);
+        bytes[7] ^= 0x20;   // "\0SCSKREc"
+        Rewrite(db, () => File.WriteAllBytes(db, bytes));
+        Assert.Throws<Recordings.IncompleteLayerList>(() => Recordings.LayerMadeOnDisk(data));
+
+        static void Rewrite(string path, Action write)
+        {
+            var written = File.GetLastWriteTimeUtc(path);
+            write();
+            File.SetLastWriteTimeUtc(path, written);
+        }
     }
 
     /// <summary>'W' records are merged by key like 'N', aren't counted as added pipelines, are counted by
@@ -693,6 +747,64 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         Assert.Empty(Pending([ab.Key, a2c.Key], Inputs(Raw("old.db", ab, Nv(ab), culled, Nv(culled)), true)));   // a key file from before: its records' keys
     }
 
+    // as ScsKiller.PendingOf counts them: each new pipeline once, by its first record
+    static List<string> Buildable(HashSet<string> warmed, HashSet<string> inputs) =>
+        [.. inputs.Where(i => !WarmInputs.Lacks(i) && !WarmInputs.Taken(warmed, i)).Select(i => WarmInputs.Records(i).First()).Distinct()];
+
+    static HashSet<string> Inputs(string store, Func<string, bool> has, string? plan = null) => WarmInputs.Of(WarmInputs.Recorded.Read([store], has, true), plan, [], has);
+
+    /// <summary>The warm drops a pipeline lacking any of its shaders (Planner.Materialize): on NVIDIA none of its stages
+    /// is buildable through it, a stage another record has with all its shaders is.</summary>
+    [Fact]
+    public void On_NVIDIA_a_pipeline_lacking_one_shader_builds_none_of_its_stages()
+    {
+        string H(char c) => new(c, 40);
+        var (rs, a, b, c, gone) = (H('9'), H('a'), H('b'), H('c'), H('f'));
+        bool Has(string h) => h != gone;
+        var store = Path.Combine(_dir, "recording.db");
+        Recordings.Merge(store, Raw("s1.db", Gfx(rs, a, b)), null);
+        var warmed = Baseline(Inputs(store, Has));
+        var lacking = Gfx(rs, c, gone);
+        Recordings.Merge(store, Raw("s2.db", lacking), null);
+        Assert.Empty(Buildable(warmed, Inputs(store, Has)));
+        Assert.Equal(2, Inputs(store, _ => true).Count(i => !WarmInputs.Lacks(i) && !WarmInputs.Taken(warmed, i)));   // its shader at hand: both stages
+        Assert.Equal([lacking.Key], Buildable(warmed, Inputs(store, _ => true)));   // one pipeline
+
+        var whole = Gfx(rs, c, b);
+        Recordings.Merge(store, Raw("s3.db", whole), null);
+        var stage = Assert.Single(Inputs(store, Has), i => !WarmInputs.Lacks(i) && !WarmInputs.Taken(warmed, i));   // the stage of c
+        Assert.Equal([lacking.Key, whole.Key], WarmInputs.Records(stage));
+    }
+
+    /// <summary>A state object built on one the warm drops is dropped too; on NVIDIA its identity is buildable while another
+    /// of its records builds on one the warm keeps, also when it's the plan that brings that record's blob.</summary>
+    [Fact]
+    public void A_state_object_on_a_base_lacking_a_library_is_buildable_only_through_another_record()
+    {
+        var gone = new string('f', 40);
+        var rsBytes = "a root signature only the plan has"u8.ToArray();
+        var rs = Convert.ToHexStringLower(SHA1.HashData(rsBytes));
+        bool Has(string h) => h != gone && h != rs;
+        var good = new PsoDb.Rec('R', So(null, Library(new('3', 40), ("Shade", null)), Rs(1, new('9', 40))));
+        var bad = new PsoDb.Rec('R', So(null, Library(gone, ("Other", null)), Rs(1, new('9', 40))));
+        var planned = new PsoDb.Rec('R', So(null, Library(new('4', 40), ("Third", null)), Rs(1, rs)));
+        var store = Path.Combine(_dir, "recording.db");
+        Recordings.Merge(store, Raw("s1.db", good), null);
+        var warmed = Baseline(Inputs(store, Has));
+        var onBad = Material(bad.Key, new('c', 40), new('a', 40), "0x1");
+        var onPlanned = Material(planned.Key, new('c', 40), new('a', 40), "0x1");   // the same addition: one identity on NVIDIA
+        Recordings.Merge(store, Raw("s2.db", bad, onBad, planned, onPlanned), null);
+        Assert.Empty(Buildable(warmed, Inputs(store, Has)));
+
+        var plan = Path.Combine(_dir, "plan.bin");
+        PlanFile.Write(new Plan("t", "c", "PCD3D_SM6", "nvidia-1", new PlanStats(0, 0, 0, 0, false), plan), [new PsoDb.Rec('B', [.. SHA1.HashData(rsBytes), .. rsBytes])]);
+        Assert.Equal([onBad.Key, planned.Key], Buildable(warmed, Inputs(store, Has, plan)));
+
+        var onGood = Material(good.Key, new('c', 40), new('a', 40), "0x1");
+        Recordings.Merge(store, Raw("s3.db", onGood), null);
+        Assert.Equal([onBad.Key], Buildable(warmed, Inputs(store, Has)));
+    }
+
     /// <summary>The NVAPI state counted is the one replayed: the last 'N' of the recordings' union (Community.Union), which
     /// drops a community 'N' this PC's recording already has.</summary>
     [Fact]
@@ -708,5 +820,43 @@ public class RecordingsTests(ITestOutputHelper output) : IDisposable
         HashSet<string> Of(params string[] recordings) => WarmInputs.Of(WarmInputs.Recorded.Read(recordings, _ => true, true), null, [], _ => true);
         Assert.Equal(Of(Raw("as-404.db", a, NvSpace(a, 404))), Of(local, community));
         Assert.NotEqual(Of(Raw("as-1001.db", a, NvSpace(a, 1001))), Of(local, community));
+    }
+
+    [Fact]
+    public void The_warmed_file_names_each_compiled_pipeline_and_the_tuple_of_each_plan_item()
+    {
+        // proxy.cpp tuple_hash, worked by hand: SHA-1 of the root signature hash, then each stage's type byte and shader hash
+        Assert.Equal("5d6cf6ec8e23db07b869dde2166978811fb97903", Recordings.TupleHash(new string('0', 40), new Dictionary<int, string> { [6] = new string('1', 40) }));
+        Assert.Equal("7b10ef75772b69308127f8728712b2f4d2d06b00",
+            Recordings.TupleHash(new string('a', 40), new Dictionary<int, string> { [2] = new string('3', 40), [1] = new string('2', 40) }));
+
+        var rs = CommunityTests.RootSignature();
+        var recorded = Cs(rs, Shader("a"));
+        var template = Cs(rs, Shader("t"));
+        var item = new PsoDb.Rec('P', PsoDb.Item(template.Key, PsoDb.Zero, new Dictionary<int, string> { [(int)Stage.Compute] = Sha(Shader("b")) }, null));
+        var main = Raw("scskiller.db", Blob(rs), Blob(Shader("a")), recorded);
+        var gen = Raw("scskiller_gen.db", Blob(Shader("t")), Blob(Shader("b")), template, item);
+
+        var file = Recordings.Warmed([main, gen, Path.Combine(_dir, "missing.db")], [Path.Combine(_dir, "no-failures.keys")]);
+
+        Assert.Equal("SCSKWRM1"u8.ToArray(), file[..8]);
+        var n = BitConverter.ToInt32(file, 8);
+        var hashes = file[12..].Chunk(20).Select(Convert.ToHexStringLower).ToList();
+        Assert.Equal(new[] { recorded.Key, template.Key }.Order(StringComparer.Ordinal), hashes[..n]);
+        string Tuple(string shader) => Recordings.TupleHash(Sha(rs), new Dictionary<int, string> { [(int)Stage.Compute] = shader });
+        Assert.Equal(new[] { Tuple(Sha(Shader("a"))), Tuple(Sha(Shader("t"))), Tuple(Sha(Shader("b"))) }.Order(StringComparer.Ordinal), hashes[n..]);
+
+        // what the warm processes didn't create (their scskiller_failed.keys): the recorded pipeline, the template (its plan
+        // item still built on it) and a second plan item
+        var failedItem = new PsoDb.Rec('P', PsoDb.Item(template.Key, PsoDb.Zero, new Dictionary<int, string> { [(int)Stage.Compute] = Sha(Shader("c")) }, null));
+        gen = Raw("scskiller_gen.db", Blob(Shader("t")), Blob(Shader("b")), Blob(Shader("c")), template, item, failedItem);
+        var failed = Path.Combine(_dir, "stage-1", Recordings.FailedFile);
+        Directory.CreateDirectory(Path.GetDirectoryName(failed)!);
+        File.WriteAllBytes(failed, [.. Convert.FromHexString(recorded.Key), .. Convert.FromHexString(template.Key)]);
+        File.WriteAllBytes(Path.Combine(_dir, Recordings.FailedFile), Convert.FromHexString(failedItem.Key));   // another process's
+
+        file = Recordings.Warmed([main, gen], [failed, Path.Combine(_dir, Recordings.FailedFile)]);
+        Assert.Equal(0, BitConverter.ToInt32(file, 8));
+        Assert.Equal([Tuple(Sha(Shader("b")))], file[12..].Chunk(20).Select(Convert.ToHexStringLower));
     }
 }

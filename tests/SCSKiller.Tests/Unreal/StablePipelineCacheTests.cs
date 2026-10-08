@@ -59,13 +59,24 @@ public class StablePipelineCacheTests
         Assert.Equal([Hex(1), Hex(2)], psos[0].Shaders);
     }
 
+    /// <summary>Versions 29 and 30 change only PSO bodies past their type (Gears of War: E-Day ships 30).</summary>
+    [Theory]
+    [InlineData(29u)]
+    [InlineData(30u)]
+    public void ReadsVersions29And30(uint version)
+    {
+        var psos = StablePipelineCache.Read(File(version, (7, 1, [H(1), H(2)]), (8, 0, [H(3)]), (9, 2, [H(4)])))!;
+        Assert.Equal([StablePipelineCache.PsoType.Graphics, StablePipelineCache.PsoType.Compute, StablePipelineCache.PsoType.RayTracing], psos.Select(p => p.Type));
+        Assert.Equal([Hex(1), Hex(2)], psos[0].Shaders);
+    }
+
     [Fact]
     public void RefusesOtherVersionsAndBrokenFiles()
     {
         Assert.NotNull(StablePipelineCache.Read(File(22, (1, 1, [H(1)]))));
         Assert.Null(StablePipelineCache.Read(File(21, (1, 1, [H(1)]))));
         Assert.Null(StablePipelineCache.Read(File(16, (1, 1, [H(1)]))));
-        Assert.Null(StablePipelineCache.Read(File(29, (1, 1, [H(1)]))));
+        Assert.Null(StablePipelineCache.Read(File(31, (1, 1, [H(1)]))));
         var f = File(28, (1, 1, [H(1)]));
         Assert.Null(StablePipelineCache.Read(f.AsSpan(0, f.Length - 1)));
         Assert.Null(StablePipelineCache.Read(f.Concat(new byte[8]).ToArray())); // no EOF-MARK at the end

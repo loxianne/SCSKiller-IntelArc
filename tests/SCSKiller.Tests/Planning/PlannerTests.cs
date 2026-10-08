@@ -124,51 +124,7 @@ public class PlannerTests(ITestOutputHelper output)
         Assert.Equal(n, ok);
     }
 
-    /// <summary>Same (root sig, stages) tuples as gen/generate.py on the same index + recording.</summary>
-    [Trait("Needs", "Game")]
-    [Fact]
-    public void MatchesPythonReference()
-    {
-        // this checkout's gen/ (a worktree's, not the main tree's)
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
-        while (root.Parent != null && !File.Exists(Path.Combine(root.FullName, "SCSKiller.slnx"))) root = root.Parent;
-        var gen = Path.Combine(root.FullName, "gen");
-        if (!Ff7.HasIndex || !File.Exists(Path.Combine(gen, "generate.py"))) return;
-        var dir = Ff7.TempDir("parity");
-        var pyOut = Path.Combine(dir, "py_gen.db");
-        // the reference, minus writing ~700 MB of shader blobs: only its 'P' items are compared
-        var script = "import builtins, io, struct, sys; sys.path.insert(0, sys.argv[1]); import generate; "
-            + "generate.open = lambda p, *a, **k: io.BytesIO() if p.endswith('.bin') else builtins.open(p, *a, **k); "
-            + "generate.write_gen_db = lambda path, blobs, items: open(path, 'wb').write(b''.join(b'P' + struct.pack('<I', len(p)) + p for p in items)); "
-            + "generate.main(sys.argv[2], sys.argv[3], sys.argv[4])";
-        var sw = Stopwatch.StartNew();
-        var psi = new ProcessStartInfo("python", ["-c", script, gen, Ff7.JsonlDir(), Ff7.RecordingDb, pyOut]) { RedirectStandardOutput = true, RedirectStandardError = true };
-        using (var py = Process.Start(psi)!)
-        {
-            output.WriteLine(py.StandardOutput.ReadToEnd() + py.StandardError.ReadToEnd());
-            py.WaitForExit();
-            Assert.Equal(0, py.ExitCode);
-        }
-        output.WriteLine($"python: {sw.Elapsed.TotalSeconds:F1}s");
-        var python = PsoDb.Read(pyOut).Select(r => PsoDb.ParseItem(r.Payload)).Select(i => PsoDb.Tuple(i.Rs, i.Stages)).ToHashSet();
-
-        sw.Restart();
-        var plan = new Planner().Build(Ff7.Game, Ue426, Ff7.Index(), new Recording(Ff7.RecordingDb), StateDependent, dir, new Progress<string>(output.WriteLine), CancellationToken.None);
-        output.WriteLine($"c#: {sw.Elapsed.TotalSeconds:F1}s, {plan.Stats}");
-        var cs = Ff7.PlanTuples(plan.FilePath);
-        output.WriteLine($"python {python.Count} tuples, c# {cs.Count}, only python {python.Except(cs).Count()}, only c# {cs.Except(python).Count()}");
-        Assert.True(python.SetEquals(cs));
-        // same template choice and input layouts too: the 'P' items are byte-identical
-        var pyItems = PsoDb.Read(pyOut).Select(r => Convert.ToHexString(r.Payload)).ToHashSet();
-        Assert.True(pyItems.SetEquals(PlanFile.Read(plan.FilePath).Records.Where(r => r.Tag == 'P').Select(r => Convert.ToHexString(r.Payload))));
-
-        // NVIDIA caps (synthesized templates allowed for shapes the recording lacks): FF7's recording has every shape
-        var nv = new Planner().Build(Ff7.Game, Ue426, Ff7.Index(), new Recording(Ff7.RecordingDb), Ff7.Nvidia, Path.Combine(dir, "nv"), null, CancellationToken.None);
-        var extra = Ff7.PlanTuples(nv.FilePath).Except(python).Count();
-        output.WriteLine($"with NVIDIA caps: {nv.Stats}, {extra} tuples beyond python");
-    }
-
-    /// <summary>eval_plan.py: a plan built from the first 551 recorded PSOs covers the new tuples recorded after it.</summary>
+    /// <summary>A plan built from the first 551 recorded PSOs covers the new tuples recorded after it.</summary>
     [Trait("Needs", "Game")]
     [Fact]
     public void HoldoutCoverage()

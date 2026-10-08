@@ -45,17 +45,6 @@ public class ConfirmedEnginesTests : IDisposable
     }
 
     [Fact]
-    public void Embedded_list_is_the_same_bytes_the_server_serves()
-    {
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
-        while (!File.Exists(Path.Combine(root.FullName, "SCSKiller.slnx"))) root = root.Parent!;
-        var served = Path.Combine(root.FullName, "server-rs", "content", "confirmed-engines.json");
-        if (!Directory.Exists(Path.Combine(root.FullName, "server-rs"))) return;   // the public source has no server-rs/
-        Assert.Equal(File.ReadAllBytes(Path.Combine(root.FullName, "src", "SCSKiller.Core", "Planning", "confirmed-engines.json")),
-                     File.ReadAllBytes(served));
-    }
-
-    [Fact]
     public void A_server_copy_only_adds_to_the_embedded_list()
     {
         var list = ConfirmedEngines.TryParse(One(e => e["fork"] = "GAME_Some_Fork2"))!;

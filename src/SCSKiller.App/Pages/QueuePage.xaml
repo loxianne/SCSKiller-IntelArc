@@ -16,6 +16,10 @@
             <Setter Property="Padding" Value="8,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
+        <Style x:Key="RowItem" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
+            <Setter Property="Padding" Value="16,0" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        </Style>
     </Page.Resources>
 
     <!-- Every row uses the same columns as the header: handle, number, icon, game, time, cache, actions. -->
@@ -121,13 +125,8 @@
                     </Grid>
 
                     <ListView ItemsSource="{x:Bind Vm.Waiting}" SelectionMode="None" CanDragItems="True" CanReorderItems="True" AllowDrop="True"
-                              DragItemsStarting="OnDragStarting" DragItemsCompleted="OnDragCompleted" AutomationProperties.Name="Waiting games">
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
-                                <Setter Property="Padding" Value="16,0" />
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                            </Style>
-                        </ListView.ItemContainerStyle>
+                              DragItemsStarting="OnDragStarting" DragItemsCompleted="OnDragCompleted" AutomationProperties.Name="Waiting games"
+                              ItemContainerStyle="{StaticResource RowItem}">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="local:QueueRow">
                                 <Grid ColumnSpacing="12" MinHeight="56">
@@ -184,10 +183,11 @@
                             <TextBlock Text="Finished" Style="{StaticResource Caption}" VerticalAlignment="Center" />
                             <HyperlinkButton Content="Clear finished" HorizontalAlignment="Right" FontSize="12" Click="OnClearFinished" />
                         </Grid>
-                        <ItemsControl ItemsSource="{x:Bind Vm.Finished}" IsTabStop="False">
-                            <ItemsControl.ItemTemplate>
+                        <ListView ItemsSource="{x:Bind Vm.Finished}" SelectionMode="None" IsItemClickEnabled="True" ItemClick="OnGameClick"
+                                  ItemContainerStyle="{StaticResource RowItem}" AutomationProperties.Name="Finished games">
+                            <ListView.ItemTemplate>
                                 <DataTemplate x:DataType="local:QueueRow">
-                                    <Grid Margin="16,0" ColumnSpacing="12" MinHeight="48">
+                                    <Grid ColumnSpacing="12" MinHeight="48">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="16" />
                                             <ColumnDefinition Width="24" />
@@ -217,8 +217,8 @@
                                         </Button>
                                     </Grid>
                                 </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                            </ListView.ItemTemplate>
+                        </ListView>
                     </StackPanel>
                 </StackPanel>
             </Border>

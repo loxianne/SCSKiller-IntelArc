@@ -19,7 +19,7 @@ public sealed class UbisoftSource : IGameSource
             using var key = root.OpenSubKey(id);
             if (key?.GetValue("InstallDir") is not string install || !Directory.Exists(install)) continue;
             if (GameFiles.FindExe(install) is not { } exe) continue;
-            games.Add(new Game($"ubisoft:{id}", Path.GetFileName(install.TrimEnd('\\')), Store.Other, install, exe));
+            games.Add(new Game($"ubisoft:{id}", GameFiles.FolderName(install), Store.Other, install, exe));
         }
         return games;
     }

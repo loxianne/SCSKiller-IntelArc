@@ -20,6 +20,70 @@ public class UpdateTests : IDisposable
     static byte[] Sig(string seed, string kid, string channel, byte[] feed, DateTimeOffset at) =>
         Encoding.UTF8.GetBytes(FeedTrust.Sign(Convert.FromBase64String(seed), kid, channel, feed, at));
 
+    /// <summary>A Velopack hook's step that throws is logged with the hook, and the steps after it still run.</summary>
+    [Fact]
+    public void A_failing_hook_step_is_logged_and_the_others_still_run()
+    {
+        var (log, ran) = (new List<string>(), new List<int>());
+        HookSteps.Run("Uninstalling", log.Add, () => ran.Add(1), () => throw new UnauthorizedAccessException("no task scheduler"), () => ran.Add(3));
+        Assert.Equal([1, 3], ran);
+        Assert.Equal("Uninstalling", log[0]);
+        Assert.StartsWith("Uninstalling: step 2 of 3 failed, the others ran: System.UnauthorizedAccessException: no task scheduler", log[1]);
+        Assert.Equal(2, log.Count);
+    }
+
+    /// <summary>updates.log stays small: at its limit it becomes updates.log.1, the one before goes, the newest lines stay.</summary>
+    [Fact]
+    public void A_capped_log_keeps_one_older_file()
+    {
+        for (var i = 0; i < 100; i++) ScsKiller.AppendLog(_dir, "updates.log", $"step {i}", 1000);
+        Assert.Equal(new[] { "updates.log", "updates.log.1" }, Directory.GetFiles(_dir).Select(f => Path.GetFileName(f)).Order().ToArray());
+        var (log, older) = (new FileInfo(Path.Combine(_dir, "updates.log")), new FileInfo(Path.Combine(_dir, "updates.log.1")));
+        Assert.True(log.Length < 1000 + 100 && older.Length >= 1000, $"{log.Length}, {older.Length}");
+        Assert.EndsWith("step 99", File.ReadAllLines(log.FullName)[^1]);
+        Assert.EndsWith($"step {int.Parse(File.ReadAllLines(log.FullName)[0].Split(' ')[^1]) - 1}", File.ReadAllLines(older.FullName)[^1]);   // no line lost in between
+    }
+
+    /// <summary>Writers at once (the app, the CLI, the uninstall hook take the same named lock): a rotation never replaces the
+    /// older file with a fresh one another writer had just started.</summary>
+    [Fact]
+    public void Writers_at_once_keep_a_whole_older_file()
+    {
+        Parallel.For(0, 400, new ParallelOptions { MaxDegreeOfParallelism = 4 }, i => ScsKiller.AppendLog(_dir, "updates.log", $"step {i}", 1000));
+        var (log, older) = (new FileInfo(Path.Combine(_dir, "updates.log")), new FileInfo(Path.Combine(_dir, "updates.log.1")));
+        Assert.True(older.Length >= 1000 && log.Length < 1000 + 100, $"{log.Length}, {older.Length}");
+    }
+
+    /// <summary>Without the log's lock (its name taken by another kind of object, or held by another writer) the line is still
+    /// appended, unrotated, and nothing throws.</summary>
+    [Fact]
+    public void A_log_whose_lock_is_unavailable_still_appends()
+    {
+        Directory.CreateDirectory(_dir);
+        var path = Path.Combine(_dir, "updates.log");
+        File.WriteAllText(path, new string('x', 2000));
+        using (new EventWaitHandle(false, EventResetMode.ManualReset, ScsKiller.LogMutexName(Path.GetFullPath(path))))
+            ScsKiller.AppendLog(_dir, "updates.log", "no lock", 1000);
+        Assert.EndsWith("no lock", File.ReadAllLines(path)[^1]);
+
+        using var taken = new ManualResetEventSlim();
+        using var done = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            using var m = new Mutex(false, ScsKiller.LogMutexName(Path.GetFullPath(path)));
+            m.WaitOne();
+            taken.Set();
+            done.Wait();
+            m.ReleaseMutex();
+        });
+        holder.Start();
+        taken.Wait();
+        try { ScsKiller.AppendLog(_dir, "updates.log", "held", 1000); }
+        finally { done.Set(); holder.Join(); }
+        Assert.EndsWith("held", File.ReadAllLines(path)[^1]);
+        Assert.False(File.Exists(path + ".1"));   // never rotated without the lock
+    }
+
     [Fact]
     public void GoodSignature_WithEitherPinnedKey_IsAccepted()
     {
@@ -366,7 +430,7 @@ public class UpdateTests : IDisposable
         Assert.True(start.IndexOf("await App.Core.ScanAsync(") is >= 0 and var scan && scan < start.IndexOf("BeginUpdate()"));
         Assert.Contains("() => Untouched() && !GameRunning()", start);
         Assert.Contains("s.Refused(FeedTrust.ReleaseKeys)", updater);
-        Assert.Contains(".SetAutoApplyOnStartup(false)", updater);
+        Assert.Contains(".SetAutoApplyOnStartup(false)", File.ReadAllText(Path.Combine(app, "UpdateHooks.cs")));
         Assert.Contains("if (ready?.Channel == channel && !SignedFeedSource.Partial) Stage(null);", updater);   // a feed missing a channel drops nothing
         var appXaml = File.ReadAllText(Path.Combine(app, "App.xaml.cs"));
         Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(appXaml, @"Updater\.ApplyOnExitAsync\("));   // QuitAsync only, not SessionEnd

@@ -10,7 +10,7 @@ using System.Text.Json;
 
 namespace SCSKiller.Core.App;
 
-/// <summary>The supporter's entitlements from the last token (docs/auth-contract.md): <c>ent</c> flags ("db", "beta",
+/// <summary>The supporter's entitlements from the last token: <c>ent</c> flags ("db", "beta",
 /// "alpha", "prio", "internal"; the UI ignores others) and <c>until</c>, when they end, grace included (null: no end date).</summary>
 public sealed record AccountStatus(IReadOnlyList<string> Ent, DateTimeOffset? Until)
 {
@@ -26,7 +26,7 @@ public sealed record AccountStatus(IReadOnlyList<string> Ent, DateTimeOffset? Un
 /// <summary>A failure worded for the user.</summary>
 public sealed class AccountException(string message) : Exception(message);
 
-/// <summary>Sign in with Patreon (patreon-and-updates.md §1.3, §2; wire shapes in auth-contract.md). The device token lives DPAPI-protected in auth.dat;
+/// <summary>Sign in with Patreon. The device token lives DPAPI-protected in auth.dat;
 /// the access token only in memory. Every method reports failures through <see cref="Problem"/>, never by throwing, so
 /// the UI works with the server unreachable.</summary>
 public sealed class Account

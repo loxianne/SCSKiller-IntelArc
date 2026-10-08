@@ -8,14 +8,14 @@ using SCSKiller.Core.Planning;
 
 namespace SCSKiller.Core.App;
 
-/// <summary>A manifest entry: a game build's merged hash-only recording (docs/db-contract.md). <see cref="Object"/> is the
+/// <summary>A manifest entry: a game build's merged hash-only recording. <see cref="Object"/> is the
 /// lowercase hex SHA-256 of the bytes served at /v1/o/&lt;Object&gt;, <see cref="Size"/> their length.</summary>
 public sealed record CommunityEntry(string ContentHash, string Object, long Size, int Psos, int Uploaders);
 
 /// <summary>What was downloaded for a game (games\&lt;id&gt;\community.json, next to community.db).</summary>
 public sealed record CommunityDownload(string Object, string ContentHash, int Psos, DateTimeOffset DownloadedAt);
 
-/// <summary>The manifest (docs/db-contract.md): fixed 80-byte little-endian records, replayed in file order. Record 0 is the
+/// <summary>The manifest: fixed 80-byte little-endian records, replayed in file order. Record 0 is the
 /// 'M' header (format 1, the epoch); 'E' entry: content hash -> object (the last one wins); 'P' the same for a middleware
 /// pack, by its pack hash; 'A' alias: SHA-1 of the store build key -> content hash; 'T' tombstone: withdraws an entry or
 /// pack until a later 'E' or 'P'. Unknown kinds are skipped.</summary>
@@ -69,16 +69,16 @@ public sealed class CommunityManifest
         : AliasKey(g) is { } k && aliases.TryGetValue(k, out var h) ? entries.GetValueOrDefault(h) : null;
 }
 
-/// <summary>The read side of the community shader hash database (docs/plan-db.md §6, docs/db-contract.md): the manifest,
+/// <summary>The read side of the community shader hash database: the manifest,
 /// kept under %LOCALAPPDATA%\SCSKiller\community and brought up to date at most every <see cref="ManifestMaxAge"/> (a Range
 /// request for the records after the copy's end), and recordings downloaded with an access token that carries "db",
-/// checked by SHA-256 and by content, then kept for good (plan-db.md §4 "Churn"). Every failure (offline, 401/403, 429,
+/// checked by SHA-256 and by content, then kept for good. Every failure (offline, 401/403, 429,
 /// the server down) lands in <see cref="Problem"/>; nothing throws but cancellation, so a scan or a compile always goes on
 /// locally.</summary>
 public sealed class Community
 {
     public static readonly TimeSpan ManifestMaxAge = TimeSpan.FromHours(4);
-    public const int MaxRaw = 256 << 20;   // decompressed (db-contract.md)
+    public const int MaxRaw = 320 << 20;   // decompressed: 1,342 bytes a record at HashOnly.MaxEntryRecords
 
     readonly string dir;
     readonly RouteFailover routes;
@@ -244,7 +244,7 @@ public sealed class Community
                 return null;
             }
             MiddlewarePack pack;
-            try { pack = MiddlewarePacks.FromShared(HashOnly.CheckPack(HashOnly.Canonical(HashOnly.Decompress(packed, MaxRaw), local: false, out _, HashOnly.MaxEntryStateObjectRefs)), dll, image, amd, e.Object, out _); }
+            try { pack = MiddlewarePacks.FromShared(HashOnly.CheckPack(HashOnly.Canonical(HashOnly.Decompress(packed, MaxRaw), local: false, out _, HashOnly.MaxEntryStateObjectRefs, maxRecords: HashOnly.MaxEntryRecords)), dll, image, amd, e.Object, out _); }
             catch (InvalidDataException)
             {
                 Problem = "An upscaler pack this version can't read was ignored. An update of SCSKiller may fix it.";
@@ -280,16 +280,18 @@ public sealed class Community
     /// The same check the server applies to uploads (<see cref="HashOnly.Canonical"/>).</summary>
     public static int? Check(byte[] raw)
     {
-        try { return HashOnly.Count(HashOnly.Canonical(HashOnly.Records(raw, HashOnly.RemoteLimit), local: false, out _, HashOnly.MaxEntryStateObjectRefs)).Psos; }
+        try { return HashOnly.Count(HashOnly.Canonical(HashOnly.Records(raw, HashOnly.RemoteLimit), local: false, out _, HashOnly.MaxEntryStateObjectRefs, maxRecords: HashOnly.MaxEntryRecords)).Psos; }
         catch (InvalidDataException) { return null; }
     }
 
     /// <summary><paramref name="output"/> = <paramref name="first"/>'s records (none when it doesn't exist), then
-    /// <paramref name="second"/>'s that it lacks (by Rec.Key), every 'B' first, as a proxy db.</summary>
-    public static void Union(string first, string second, string output)
+    /// <paramref name="second"/>'s that it lacks (by Rec.Key) and <paramref name="leaveOut"/> doesn't name, every 'B' first,
+    /// as a proxy db.</summary>
+    public static void Union(string first, string second, string output, IReadOnlySet<string>? leaveOut = null)
     {
         // streamed: a local recording with its shader bytes can be large
         var have = File.Exists(first) ? PsoDb.Read(first).Select(r => r.Key).ToHashSet() : [];
+        if (leaveOut != null) have.UnionWith(leaveOut);
         IEnumerable<PsoDb.Rec> Pass(bool blobs) => (File.Exists(first) ? PsoDb.Read(first) : []).Where(r => r.Tag == 'B' == blobs)
             .Concat(PsoDb.Read(second).Where(r => r.Tag == 'B' == blobs && have.Add(r.Key)));
         var tmp = output + ".tmp";
@@ -305,9 +307,9 @@ public sealed class Community
     /// <summary>A response body of at most <paramref name="max"/> bytes, null past it; cancelled after <see cref="BodyIdle"/> without a byte.</summary>
     async Task<byte[]?> Body(HttpResponseMessage r, int max, CancellationToken ct)
     {
-        using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        idle.CancelAfter(BodyIdle);
-        return await Bounded(await r.Content.ReadAsStreamAsync(idle.Token), max, idle.Token, () => idle.CancelAfter(BodyIdle));
+        using var idle = new CancellationTokenSource(BodyIdle, clock);
+        using var either = CancellationTokenSource.CreateLinkedTokenSource(ct, idle.Token);
+        return await Bounded(await r.Content.ReadAsStreamAsync(either.Token), max, either.Token, () => idle.CancelAfter(BodyIdle));
     }
 
     static async Task<byte[]?> Bounded(Stream s, int max, CancellationToken ct, Action? progress = null)
@@ -319,6 +321,7 @@ public sealed class Community
             for (int n; (n = await s.ReadAsync(chunk, ct)) > 0;)
             {
                 if (buf.Length + n > max) return null;
+                if (buf.Length + n > buf.Capacity) buf.Capacity = (int)Math.Min(max, Math.Max(2L * buf.Capacity, buf.Length + n));   // MemoryStream's own doubling would pass max
                 buf.Write(chunk, 0, n);
                 progress?.Invoke();
             }

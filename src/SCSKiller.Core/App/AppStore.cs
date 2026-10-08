@@ -63,6 +63,8 @@ public sealed class GameRecord
     public string? RunsExe { get; set; }                    // the exe of its install the game was seen running when discovery named another: used instead (ScsKiller.Following)
     public string? RunsExeFrom { get; set; }                // ...discovery's exe then, and the build (store version, else RunsExe's size and write time):
     public string? RunsExeBuild { get; set; }               // either changed, RunsExe is dropped
+    public DateTimeOffset? RunsExeAt { get; set; }          // when the watcher last followed it: the launch it ran in wasn't recorded,
+    public string? RunsExeWas { get; set; }                 // ...the recorder was armed for this exe then
     public string? RecorderMoveTo { get; set; }              // ...and the game's exe it moves next to: the uninstall hook's running check covers both
     // null = not migrated: the first reconcile makes an installed recorder of ours On (the user put it there), else Default
     public RecorderOverride? Recorder { get; set; }
@@ -86,7 +88,8 @@ public sealed class GameRecord
     public bool AgsMissed { get; set; }                     // a launch after such a warm showed it missed the game: warms stay plain until the game is seen holding the AGS key
     public bool Careful { get; set; }                       // AMD: compile in passes on few threads (ScsKiller.CarefulThreads)
     public bool WarmedCareful { get; set; }                 // the last complete warm was careful
-    public LaunchCheck? FirstLaunch { get; set; }           // the game's first launch after the last complete warm (AMD); null = not yet
+    public LaunchCheck? FirstLaunch { get; set; }           // the game's first launch after the last complete warm (AMD, NVIDIA); null = not yet
+    public DateTimeOffset? UnreachedWarm { get; set; }      // NVIDIA: the WarmedAt of a warm that launch showed the game's lookups miss (ScsKiller.IsUnreached)
     public PlayWindow? LastPlay { get; set; }               // the last run of the game the app watched from start to exit
     public bool RecordedLong { get; set; }                   // a recorded launch of ScsKiller.EnoughRecording or more since the recording was last cleared
     public bool RtUnseen { get; set; }                       // a recorded launch of ScsKiller.EnoughRecording built no ray tracing state object, and none since did
@@ -120,18 +123,142 @@ public sealed record OfflineSession(string GameId, string Exe, string InstallDir
 
 public sealed record KeptList(string Build, string? Driver, List<GameState> Games);
 
+/// <summary>window.json: the main window's restored bounds in workspace pixels (GetWindowPlacement's), and whether it was
+/// maximized.</summary>
+public sealed record WindowBounds(int Left, int Top, int Width, int Height, bool Maximized)
+{
+    /// <summary>From GetWindowPlacement's showCmd and flags: minimized counts as maximized when it restores to maximized.</summary>
+    public static bool WasMaximized(int showCmd, int flags) => showCmd == 3 /* SW_SHOWMAXIMIZED */ || showCmd == 2 /* SW_SHOWMINIMIZED */ && (flags & 2 /* WPF_RESTORETOMAXIMIZED */) != 0;
+}
+
 /// <summary>Pipelines new since the last complete warm, as counted from the files and keys <paramref name="Key"/> stamps.</summary>
-public sealed record PendingCount(string Key, long Recorded, long? Planned, bool Unknown);
+public sealed record PendingCount(string Key, long Recorded, long? Planned, bool Unknown, long Upscaler = 0);
 
 /// <summary>The expensive part of a scan (engine detection, planner check, anti-cheat), reused while <see cref="Key"/>
 /// (exe stamp, store version, vendor profile, recording, SCSKiller build) is unchanged. <paramref name="Clean"/>: the
 /// <see cref="ScsKiller.FolderStamp"/> at the last full anti-cheat check that found none.</summary>
-public sealed record Evaluation(string Key, EngineInfo? Engine, AntiCheat AntiCheat, PlanCheck Check, string? Clean = null);
+public sealed record Evaluation(string Key, EngineInfo? Engine, AntiCheat AntiCheat, PlanCheck Check, string? Clean = null,
+    bool StreamlineFirst = false, IReadOnlyList<string>? StreamlineFiles = null, string? StreamlineStamp = null);   // GameFiles.StreamlineFirst
 
-/// <summary>%LOCALAPPDATA%\SCSKiller: settings.json, scan.json, dismissed.json + games\&lt;id&gt;\state.json.</summary>
+/// <summary>%LOCALAPPDATA%\SCSKiller, or the portable build's data\: settings.json, scan.json, dismissed.json + games\&lt;id&gt;\state.json.</summary>
 public sealed class AppStore(string dataDir)
 {
-    public static string DefaultDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCSKiller");
+    /// <summary>%LOCALAPPDATA%\SCSKiller, or data\ beside the portable build's SCSKiller.exe. The recorder's ledger stays in
+    /// %LOCALAPPDATA%\SCSKiller\armed for both (<see cref="ScsKiller.LedgerDir"/>): the proxy reads it there.</summary>
+    public static string DefaultDir => _defaultDir.Value;
+
+    static readonly Lazy<string> _defaultDir = new(() =>
+        Resolve(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SCSKiller"), PortableRoot(AppContext.BaseDirectory), out _onOldFolder));
+
+    static IDisposable? _onOldFolder;   // held for the process's life (Resolve)
+
+    /// <summary>The folder Velopack's portable zip was unpacked to: its .portable marker sits beside Update.exe, with the app
+    /// in current\ and the CLI in current\cli\. Null for an installed or a dev build.</summary>
+    internal static string? PortableRoot(string baseDir) =>
+        new[] { "..", Path.Combine("..", "..") }.Select(up => Path.GetFullPath(Path.Combine(baseDir, up)))
+            .FirstOrDefault(d => File.Exists(Path.Combine(d, ".portable")));
+
+    /// <summary>The portable build's data\. Its first start copies what an earlier portable build kept in <paramref name="local"/>
+    /// and leaves that folder as it was, since an installed SCSKiller may share it. data\ counts once it holds
+    /// <see cref="MigratedFile"/>, written last into a fresh data.partial that is then renamed. One process copies at a time
+    /// and the others wait for it (the app and the CLI started together, also in other Windows sessions). A copy that fails
+    /// (a folder that can't be written, a full disk) keeps <paramref name="local"/> for this run, and the next start copies it
+    /// whole again, with what that run saved there. A data\ without the marker is moved aside to data.stale-&lt;n&gt;, never
+    /// used. A process that stays on <paramref name="local"/> says so through <paramref name="onOldFolder"/>, a handle to keep
+    /// open while it runs: no copy is made meanwhile, since its later saves would stay behind.</summary>
+    internal static TimeSpan CopyWait = TimeSpan.FromSeconds(30);   // replaceable for tests
+
+    internal static string CopyMutex(string portable) => $@"Global\SCSKiller-portable-copy-{PortableId(portable)}";
+
+    static string PortableId(string portable) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.TrimEndingDirectorySeparator(Path.GetFullPath(portable)).ToUpperInvariant())))[..16];
+
+    internal static string Resolve(string local, string? portable, out IDisposable? onOldFolder)
+    {
+        onOldFolder = null;
+        if (portable == null) return local;
+        var data = Path.Combine(portable, "data");
+        if (File.Exists(Path.Combine(data, MigratedFile))) return data;
+        var id = PortableId(portable);
+        var oldFolder = $@"Global\SCSKiller-portable-old-folder-{id}";
+        Mutex gate;
+        try { gate = new Mutex(false, CopyMutex(portable)); }
+        catch (Exception)   // another user's, which this one can't open: no copy
+        {
+            onOldFolder = Hold(oldFolder);
+            return local;
+        }
+        using (gate)
+        {
+            bool owned;
+            try { owned = gate.WaitOne(CopyWait); }
+            catch (AbandonedMutexException) { owned = true; }   // its holder died mid-copy, and this one copies again
+            if (!owned)   // another process copies for longer than this one waits (Velopack's hooks get 60 s): the old folder, this run
+            {
+                onOldFolder = Hold(oldFolder);
+                return local;
+            }
+            var partial = data + ".partial";
+            try
+            {
+                if (File.Exists(Path.Combine(data, MigratedFile))) return data;
+                if (Held(oldFolder))
+                {
+                    onOldFolder = Hold(oldFolder);
+                    return local;
+                }
+                if (Directory.Exists(partial)) Directory.Delete(partial, true);
+                Directory.CreateDirectory(partial);
+                if (Directory.Exists(local))
+                    foreach (var f in Directory.EnumerateFiles(local, "*", SearchOption.AllDirectories))
+                    {
+                        var rel = Path.GetRelativePath(local, f);
+                        // the ledger isn't read from here, and a staged update, an apply marker and the locks belong to that folder's own app
+                        if (rel.StartsWith("armed" + Path.DirectorySeparatorChar) || rel is "update-staged.json" or "applying" || rel.EndsWith(".lock")) continue;
+                        var to = Path.Combine(partial, rel);
+                        Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+                        File.Copy(f, to);
+                    }
+                File.WriteAllText(Path.Combine(partial, MigratedFile), "");
+                if (Directory.Exists(data))
+                {
+                    var n = 1;
+                    while (Directory.Exists($"{data}.stale-{n}") || File.Exists($"{data}.stale-{n}")) n++;
+                    Directory.Move(data, $"{data}.stale-{n}");
+                }
+                Directory.Move(partial, data);
+                return data;
+            }
+            catch (Exception)
+            {
+                try { Directory.Delete(partial, true); } catch (Exception) { }
+                onOldFolder = Hold(oldFolder);
+                return local;
+            }
+            finally { gate.ReleaseMutex(); }
+        }
+
+        // the open handle is the signal, not ownership: it lasts as long as any process keeps one, whichever thread made it
+        static IDisposable? Hold(string name)
+        {
+            try { return new Mutex(false, name); }
+            catch (Exception) { return null; }
+        }
+
+        static bool Held(string name)
+        {
+            try
+            {
+                if (!Mutex.TryOpenExisting(name, out var m)) return false;
+                m.Dispose();
+                return true;
+            }
+            catch (UnauthorizedAccessException) { return true; }   // another user's process holds it
+        }
+    }
+
+    /// <summary>In the portable build's data\ once <see cref="Resolve"/> has copied the old folder into it.</summary>
+    internal const string MigratedFile = "migrated";
 
     public static readonly JsonSerializerOptions Json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 
@@ -143,6 +270,15 @@ public sealed class AppStore(string dataDir)
 
     public Settings LoadSettings() => Load<Settings>(Path.Combine(DataDir, "settings.json")) ?? DefaultSettings;
     public void SaveSettings(Settings s) => Save(Path.Combine(DataDir, "settings.json"), s);
+
+    /// <summary>Null until a window was saved, or when the file can't be read or has no size: the default size then.</summary>
+    public WindowBounds? LoadWindow()
+    {
+        try { return Load<WindowBounds>(Path.Combine(DataDir, "window.json")) is { Width: > 0, Height: > 0 } w ? w : null; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    public void SaveWindow(WindowBounds w) => Save(Path.Combine(DataDir, "window.json"), w);
 
     public Dictionary<string, Evaluation> LoadScan() => Load<Dictionary<string, Evaluation>>(Path.Combine(DataDir, "scan.json")) ?? [];
     public void SaveScan(Dictionary<string, Evaluation> scan) => Save(Path.Combine(DataDir, "scan.json"), scan);
@@ -174,7 +310,7 @@ public sealed class AppStore(string dataDir)
     public Dictionary<string, string> LoadDismissed() => Load<Dictionary<string, string>>(Path.Combine(DataDir, "dismissed.json")) ?? [];
     public void SaveDismissed(Dictionary<string, string> dismissed) => Save(Path.Combine(DataDir, "dismissed.json"), dismissed);
 
-    /// <summary>Game id -> what the new-shaders notification last told about it (<see cref="NewShaders.Key"/>).</summary>
+    /// <summary>Game id -> what the new-shaders notification last told about it, and when (<see cref="NewShaders.Due"/>).</summary>
     public Dictionary<string, string> LoadNotified() => Load<Dictionary<string, string>>(Path.Combine(DataDir, "notified.json")) ?? [];
     public void SaveNotified(Dictionary<string, string> notified) => Save(Path.Combine(DataDir, "notified.json"), notified);
 
@@ -185,6 +321,8 @@ public sealed class AppStore(string dataDir)
     /// <summary>Update channel -> signed_at of the newest signed feed accepted (FeedTrust: no replay of an older feed).</summary>
     public Dictionary<string, DateTimeOffset> LoadFeedTimes() => Load<Dictionary<string, DateTimeOffset>>(Path.Combine(DataDir, "feeds.json")) ?? [];
     public void SaveFeedTimes(Dictionary<string, DateTimeOffset> times) => Save(Path.Combine(DataDir, "feeds.json"), times);
+    public Dictionary<string, DateTimeOffset> LoadContentTimes() => Load<Dictionary<string, DateTimeOffset>>(Path.Combine(DataDir, "content-signed.json")) ?? [];
+    public void SaveContentTimes(Dictionary<string, DateTimeOffset> times) => Save(Path.Combine(DataDir, "content-signed.json"), times);
 
     /// <summary>The game's folder under games\: the id with ':' replaced by '_', as it always was, when that is a plain
     /// folder name (<see cref="IsPlainName"/>). Launcher metadata (an Xbox Identity.Name, an EA content id, an Epic app
@@ -233,9 +371,16 @@ public sealed class AppStore(string dataDir)
     // What each record handed out held when it was loaded or last saved: a save writes only what its holder changed since.
     readonly ConditionalWeakTable<GameRecord, JsonObject> _held = new();
 
+    /// <summary>Run with the game's id before its record is read. Replaceable for tests: a record held for as long as a test needs.</summary>
+    internal Action<string>? LoadingGame { get; set; }
+
     public GameRecord LoadGame(string gameId)
     {
+        LoadingGame?.Invoke(gameId);
         var r = Load<GameRecord>(Path.Combine(GameDir(gameId), "state.json")) ?? new GameRecord();
+        // a plan saved under another data folder (the portable build's copy, a moved portable folder): the one in this game's folder
+        if (r.Plan is { } p && Path.GetDirectoryName(p.FilePath) != GameDir(gameId) && Path.Combine(GameDir(gameId), Path.GetFileName(p.FilePath)) is var here && File.Exists(here))
+            r.Plan = p with { FilePath = here };
         _held.AddOrUpdate(r, JsonSerializer.SerializeToNode(r, Json)!.AsObject());
         return r;
     }

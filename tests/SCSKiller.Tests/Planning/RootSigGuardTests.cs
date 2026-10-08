@@ -136,7 +136,6 @@ public class RootSigGuardTests(ITestOutputHelper output)
     {
         var game = new SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:1286680");
         if (game == null || !File.Exists(game.ExePath)) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("wonderlands-data"));
         var engine = reader.Detect(game)!;
         Assert.Equal("4.21", engine.Version);
@@ -166,7 +165,6 @@ public class RootSigGuardTests(ITestOutputHelper output)
     {
         var game = new SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:1286680");
         if (game == null || !File.Exists(game.ExePath)) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("wonderlands-rec-data"));
         var engine = reader.Detect(game)!;
         Assert.Equal((RootSig.Rule.Ue421, null), (RootSig.RuleFor(engine), engine.Fork));
@@ -200,7 +198,6 @@ public class RootSigGuardTests(ITestOutputHelper output)
     {
         var game = new SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:990080");
         if (game == null || !File.Exists(game.ExePath)) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("hogwarts-data"));
         var engine = reader.Detect(game)!;
         var index = reader.Index(game, engine, null, CancellationToken.None);

@@ -266,7 +266,6 @@ public class JediSurvivorRootSigTests(Xunit.Abstractions.ITestOutputHelper outpu
     public void RootSignaturesRebuildByteExact()
     {
         if (!File.Exists(Exe)) return;
-        Ff7.Codecs();
         var game = new Game("ea:198300", "STAR WARS Jedi: Survivor", Store.EA, Install, Exe);
         var reader = new UnrealReader(Ff7.TempDir("jedi-data"));
         var engine = reader.Detect(game)!;

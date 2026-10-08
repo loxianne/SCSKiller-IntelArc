@@ -44,7 +44,7 @@ public sealed record MiddlewareImage(string Path, string ContentHash, long Size,
 /// (<see cref="MiddlewarePacks"/>).</summary>
 public static class Middleware
 {
-    /// <summary>Vendors whose packs the community database shares, free (docs/db-contract.md "Middleware packs"): the
+    /// <summary>Vendors whose packs the community database shares, free: the
     /// upscalers. Other packs stay on the PC that recorded them.</summary>
     public static readonly string[] SharedVendors = ["amd", "intel"];
 

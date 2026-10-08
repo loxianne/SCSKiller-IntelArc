@@ -38,7 +38,8 @@ public static unsafe class RootSig
     }
 
     /// <summary>The rule a game's engine (an Unreal version, REDengine 3) builds with; null = none known. A fork other than FF7's gets its base
-    /// version's stock rule, which the fork may have changed (FF7's did).</summary>
+    /// version's stock rule, which the fork may have changed (FF7's did). Kuro's 4.26 (Wuthering Waves) runs UE 5's SM6 path, whose
+    /// root signatures deny the mesh and amplification stages: no rule here builds them, so it plans only from a recording.</summary>
     public static Rule? RuleFor(EngineInfo e)
     {
         if (e.Family == RedEngine.RedEngineReader.Family) return Rule.Red3;
@@ -46,6 +47,7 @@ public static unsafe class RootSig
         if (e.Family == Dagor.DagorReader.Family) return e.Fork == Dagor.DagorReader.CbvRangesFork ? Rule.DagorCbvRanges : Rule.Dagor;
         if (e.Family != "Unreal" || !System.Version.TryParse(e.Version, out var v)) return null;
         if (e.Fork == "GAME_FinalFantasy7Rebirth" && e.Version == "4.26") return Rule.Ff7;
+        if (PlannedOnlyFromARecording(e.Fork)) return null;
         return (v.Major, v.Minor) switch
         {
             (4, 20) => Rule.Ue420,
@@ -61,6 +63,9 @@ public static unsafe class RootSig
             _ => null,
         };
     }
+
+    /// <summary>A fork no rule here builds the root signatures of (see <see cref="RuleFor"/>): planned only from a recording.</summary>
+    public static bool PlannedOnlyFromARecording(string? fork) => fork == "GAME_WutheringWaves";
 
     /// <summary>The engine's rule is confirmed by a real game (<see cref="ConfirmedEngines"/>, per version and fork). Another
     /// fork (e.g. Stellar Blade's) may add slots no shader shows, so it stays unconfirmed.</summary>
@@ -334,6 +339,18 @@ public static unsafe class RootSig
         var (ver, n, off) = (BitConverter.ToUInt32(b, 0), BitConverter.ToInt32(b, 12), BitConverter.ToInt32(b, 16));
         var size = (int)SamplerSize(ver);
         return [.. Enumerable.Range(0, n).SelectMany(i => b[(off + size * i)..(off + size * i + 52)])];
+    }
+
+    /// <summary>The RTS0 part with each static sampler's parameters (filter to max LOD) zeroed, its register, space and
+    /// visibility kept (<see cref="SamplerVariants"/>); null without static samplers.</summary>
+    internal static byte[]? WithoutSamplerSettings(byte[] blob)
+    {
+        var b = Rts0(blob).ToArray();   // a bare RTS0 is the caller's own array
+        var (ver, n, off) = (BitConverter.ToUInt32(b, 0), BitConverter.ToInt32(b, 12), BitConverter.ToInt32(b, 16));
+        if (n == 0) return null;
+        var size = (int)SamplerSize(ver);
+        for (var i = 0; i < n; i++) b.AsSpan(off + size * i, 40).Clear();
+        return b;
     }
 
     /// <summary>D3D12_STATIC_SAMPLER_DESC, or DESC1 in a 1.2 (version 3) signature.</summary>

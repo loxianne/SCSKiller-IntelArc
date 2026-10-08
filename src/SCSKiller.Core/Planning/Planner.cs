@@ -6,7 +6,7 @@ using static SCSKiller.Core.Planning.PsoDb;
 
 namespace SCSKiller.Core.Planning;
 
-/// <summary>Expands a game's shader library into every PSO it can create (port of gen/generate.py). The driver cache is
+/// <summary>Expands a game's shader library into every PSO it can create. The driver cache is
 /// keyed per (shader stages + root signature), so each generated PSO = a template of the same shape with shaders swapped:
 ///   - every compute shader
 ///   - every VS->PS, MS->PS and VS->GS->PS chain inside a shader map (Global: across maps) whose signatures link
@@ -25,7 +25,7 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
     /// <summary>Middleware packs (<see cref="MiddlewarePacks"/>): filled from recordings, seeding the plan of every game
     /// with the same middleware DLL version; null = off (the default: tests and tools opt in).</summary>
     public MiddlewarePacks? Packs { get; } = packDir == null ? null : new MiddlewarePacks(packDir);
-    /// <summary>The shared packs downloaded for this PC's GPU vendor (docs/db-contract.md "Middleware packs"): they seed
+    /// <summary>The shared packs downloaded for this PC's GPU vendor: they seed
     /// plans like <see cref="Packs"/>, and are never promoted into or uploaded; null = none.</summary>
     public MiddlewarePacks? SharedPacks { get; } = sharedPackDir == null ? null : new MiddlewarePacks(sharedPackDir);
 
@@ -49,7 +49,7 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
     /// <summary>Bump when the plan for the same game and inputs changes (new pipeline kinds, root-signature rules, D3D11):
     /// the app then rebuilds plans (warmed games' when idle, ScsKiller.CheckPlans) and offers a re-warm only where the new
     /// plan has records the warm didn't replay.</summary>
-    public const int Version = 31;
+    public const int Version = 33;
 
     /// <summary>The vendor's D3D11 driver cache persists across processes, is keyed on the exe file name and caches per
     /// shader, whatever the state or the other stages (measured on NVIDIA, proxy/probe11.cpp): a staged warm
@@ -72,6 +72,8 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
     /// <summary><see cref="Untested"/> without the recording hint: what an anti-cheat game, which can't be recorded, is told.</summary>
     public const string UntestedNote = "not tested on this engine version yet";
     public const string Record = "turn on recording and play for about 5 minutes";
+    /// <summary>Ends the reason of a game that may run on DirectX 11, where the recorder never loads.</summary>
+    public const string Dx12Only = "helps only when played on DirectX 12 (the game may run on DirectX 11)";
 
     public PlanCheck Check(Game game, EngineInfo engine, Recording? recording, VendorCaps caps)
     {
@@ -83,7 +85,7 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
         if (!api.Contains("D3D12"))
             return dx11 ? new(Readiness.Ready, "compiles every DirectX 11 shader" + api[5..])
                 : new(Readiness.Unsupported, $"runs on {(api.StartsWith("D3D11") ? "DirectX 11" + api[5..] : api)}");
-        var dx12 = CheckD3D12(engine, recording, caps, api.StartsWith("D3D12") || dx11 ? "" : "; helps only when played on DirectX 12 (the game may run on DirectX 11)");
+        var dx12 = CheckD3D12(engine, recording, caps, api.StartsWith("D3D12") || dx11 ? "" : "; " + Dx12Only);
         if (!dx11) return dx12;
         // may run on either: DX11 shaders help whatever DX12 still needs (a recording can come later)
         return new(Readiness.Ready, dx12.Readiness == Readiness.Ready ? $"{dx12.Reason}; also compiles every DirectX 11 shader (the game may run on either)"
@@ -93,7 +95,7 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
     static PlanCheck CheckD3D12(EngineInfo engine, Recording? recording, VendorCaps caps, string maybe)
     {
         if (!caps.CacheKeyedByExeName) return new(Readiness.Unsupported, "not supported on this GPU yet");
-        // EmbeddedRootSignatures: any reader of shaders that carry them (carved, FromSoftware)
+        // EmbeddedRootSignatures: any reader of shaders that carry them (carved, FromSoftware) or of records that name them (Dawn)
         if (caps.StateIndependentCache && (RootSig.Verified(engine) || engine.Version.EndsWith(CarvedReader.EmbeddedRootSignatures)))
             return new(Readiness.Ready, NoRecording + maybe);
         if (recording != null && File.Exists(recording.DbPath) && new FileInfo(recording.DbPath).Length > 0)

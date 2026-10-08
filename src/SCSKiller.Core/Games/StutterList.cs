@@ -4,7 +4,7 @@ using SCSKiller.Core.App;
 namespace SCSKiller.Core.Games;
 
 /// <summary>Games known to suffer shader-compilation stutter: known-stutter.json, embedded in Core (the default) and
-/// served at /v1/content/known-stutter.json (server-rs\content\known-stutter.json) so it can change without a release.
+/// served at /v1/content/known-stutter.json so it can change without a release.
 /// Matched by store id (Game.Id), else by name (letters and digits only, case-insensitive: "STAR WARS Jedi: Survivor™"
 /// = "Star Wars Jedi Survivor"). The server's copy replaces the embedded one when it passes <see cref="TryParse"/>
 /// (<see cref="ContentFile"/>).</summary>
@@ -72,9 +72,9 @@ public sealed class StutterList
 
     /// <summary>The Library's "Recommended" section: every listed game SCSKiller can compile (Ready, Stale, NeedsRecording,
     /// Warmed), the ones still to do first, then severe first, then by name. Warmed ones stay, last.
-    /// Anti-cheat-blocked games are Unsupported, so they stay out.</summary>
+    /// Anti-cheat-blocked games are Unsupported, and one waiting for an offline session (a ban risk) isn't recommended either.</summary>
     public static List<GameState> Recommended(IEnumerable<GameState> games) => games
-        .Where(s => s.KnownStutter != null && s.Status is GameStatus.Ready or GameStatus.Stale or GameStatus.NeedsRecording or GameStatus.Warmed)
+        .Where(s => s.KnownStutter != null && s.Status is GameStatus.Ready or GameStatus.Stale or GameStatus.NeedsRecording or GameStatus.Warmed && !App.ScsKiller.NeedsOfflineSession(s))
         .OrderBy(s => s.Status == GameStatus.Warmed).ThenByDescending(s => s.KnownStutter!.Severity)
         .ThenBy(s => s.Game.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
 

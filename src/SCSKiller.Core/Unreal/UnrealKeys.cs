@@ -14,7 +14,7 @@ public sealed class UnrealKeys(string dataDir)
     string KeyFile(Game g) => Path.Combine(new AppStore(dataDir).GameDir(g.Id), "aes.key");
     string ScanFile(Game g) => Path.Combine(new AppStore(dataDir).GameDir(g.Id), "aes.scan");
     /// <summary>Bump when <see cref="Scan"/> finds keys it missed before: a remembered failure is then scanned again.</summary>
-    const int ScanVersion = 2;
+    const int ScanVersion = 3;
     static string Stamp(string exe) => new FileInfo(exe) is { Exists: true } f ? $"{ScanVersion}:{f.Length}:{f.LastWriteTimeUtc.Ticks}" : "";
 
     /// <summary>A key that <paramref name="opens"/> the game's encrypted containers: the stored one, else a static scan of

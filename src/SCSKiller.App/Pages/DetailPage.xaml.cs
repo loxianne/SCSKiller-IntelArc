@@ -22,6 +22,14 @@ public sealed partial class DetailPage : Page
         Unloaded += (_, _) => { App.Core.GameChanged -= OnChanged; App.Core.QueueChanged -= OnQueue; Icons.Failed -= refresh.Request; App.Account.Changed -= refresh.Request; };
     }
 
+    public ContentDialog PartlyWhyDialog() => new()
+    {
+        XamlRoot = XamlRoot, Title = $"Why is {Vm.Name} partly compiled?", CloseButtonText = "Close",
+        Content = new TextBlock { Text = DetailVm.PartlyCompiledWhy, TextWrapping = TextWrapping.Wrap },
+    };
+
+    async void OnPartlyWhy(object _, RoutedEventArgs __) => await App.ShowAsync(PartlyWhyDialog());
+
     void OnDbTeaser(Microsoft.UI.Xaml.Documents.Hyperlink _, Microsoft.UI.Xaml.Documents.HyperlinkClickEventArgs __)
     {
         if (App.Account.SignedIn) App.Main.NavigateToPatreon();
@@ -127,9 +135,7 @@ public sealed partial class DetailPage : Page
 
     void OnCrumb(BreadcrumbBar _, BreadcrumbBarItemClickedEventArgs e)
     {
-        if (e.Index != 0) return;
-        if (Frame.CanGoBack && Frame.BackStack[^1].SourcePageType == typeof(LibraryPage)) Frame.GoBack();
-        else App.Main.Navigate(typeof(LibraryPage));
+        if (e.Index == 0) App.Main.ShowLibrary();
     }
 
     async void OnCompile(object _, RoutedEventArgs __)

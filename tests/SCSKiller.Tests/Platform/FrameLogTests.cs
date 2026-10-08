@@ -1,4 +1,4 @@
-using SCSKiller.Core;
+﻿using SCSKiller.Core;
 using SCSKiller.Core.App;
 using Xunit.Abstractions;
 
@@ -149,7 +149,7 @@ public class FrameLogTests(ITestOutputHelper output) : IDisposable
     {
         var rows = Enumerable.Range(0, 600).Select(i => (T: i * 10 / 3.0, Row: "S,1,1,0.500")).Concat(rest).OrderBy(r => r.T);
         var path = Path.Combine(_dir, "scskiller_creates.csv");
-        File.WriteAllLines(path, ["#session,1000000,Game.exe", .. rows.Select(r => $"{r.T:0.0},{r.Row}")]);
+        File.WriteAllLines(path, ["#session,1000000,Game.exe", .. rows.Select(r => FormattableString.Invariant($"{r.T:0.0},{r.Row}"))]);
         return path;
     }
 
@@ -390,6 +390,60 @@ public class FrameLogTests(ITestOutputHelper output) : IDisposable
         Assert.Equal([HitchCause.Shader], r.Hitches.Select(h => h.Cause));
     }
 
+    /// <summary>Lone creates before a precompile (a splash screen's) don't start the startup's clock: it counts from the
+    /// first busy second, so a precompile running 12 s is startup to its end, and a frame it fills is loading.</summary>
+    [Fact]
+    public void Startup_counts_from_the_first_busy_second()
+    {
+        var csv = Path.Combine(_dir, "scskiller_creates.csv");
+        File.WriteAllLines(csv, ["#session,1000000,Game.exe", "500.0,G,0,0,0.300", "3000.0,C,0,0,0.300",
+            .. PerSecond(5, 17, 150, "S,0,0,150.000").Concat(PerSecond(17, 60, 5, "S,1,1,0.500")).Select(c => $"{c.Item1:0.0},{c.Item2}")]);
+        var r = FrameLog.Read(FramesWithOneSlow(12_000, 400, 70_000), csv)!;
+        Assert.Equal(TimeSpan.FromSeconds(17), r.Startup);
+        Assert.Equal([HitchCause.LoadingShaders], r.Hitches.Select(h => h.Cause));
+        Assert.Equal((0L, 1800L), (SessionLog.Read(csv).Last!.Compiles, SessionLog.Read(csv).Last!.StartupCompiles));
+    }
+
+    /// <summary>A precompile starting more than 10 s after the first create doesn't start the startup: it is play.</summary>
+    [Fact]
+    public void A_precompile_past_10_s_from_the_first_create_is_play()
+    {
+        var csv = Path.Combine(_dir, "scskiller_creates.csv");
+        File.WriteAllLines(csv, ["#session,1000000,Game.exe", "500.0,G,0,0,0.300",
+            .. PerSecond(12, 20, 150, "S,0,0,150.000").Concat(PerSecond(20, 60, 5, "S,1,1,0.500")).Select(c => $"{c.Item1:0.0},{c.Item2}")]);
+        Assert.Equal((1200L, 0L), (SessionLog.Read(csv).Last!.Compiles, SessionLog.Read(csv).Last!.StartupCompiles));
+    }
+
+    /// <summary>A create of 3-10 ms between the startup and a burst within its 10 s is as likely a hit slowed by
+    /// contention: it doesn't make the burst play. One of 10 ms or more does.</summary>
+    [Theory]
+    [InlineData("5.000", 8000)]
+    [InlineData("12.000", 2000)]
+    [InlineData("10.000", 2000)]
+    public void Only_a_compile_of_10_ms_before_a_burst_makes_it_play(string ms, double startup)
+    {
+        var csv = WarmedLaunch([(4000, $"S,0,0,{ms}"), .. PerSecond(7, 8, 150, "S,1,1,0.500"), (60_000, "S,1,1,0.500")]);
+        Assert.Equal(TimeSpan.FromMilliseconds(startup), FrameLog.Read(FramesWithOneSlow(30_000, 100, 70_000), csv)!.Startup);
+    }
+
+    /// <summary>A slow frame in play whose compiles ran on 8 threads or more, none of them one that presents, is a parallel
+    /// precache or load, even when cold compiles fill it; fewer threads, a create on the presenting thread, or a recorder
+    /// that doesn't write threads make it a shader stutter. Cache hits on many threads stay another hitch.</summary>
+    [Theory]
+    [InlineData(8, -1, "Loading")]
+    [InlineData(8, 3, "Shader")]
+    [InlineData(7, -1, "Shader")]
+    [InlineData(0, -1, "Shader")]   // tid,presents not written
+    [InlineData(8, -1, "Other", "0.500")]   // cache hits only
+    public void A_parallel_load_in_play_is_loading(int threads, int presenter, string cause, string ms = "150.000")
+    {
+        var creates = Enumerable.Range(0, Math.Max(threads, 8)).Select(i => (30_050.0 + i * 0.1,
+            $"S,0,0,{ms}" + (threads == 0 ? "" : $",{i + 4000:x40},0.010,{100 + i % threads},{(i == presenter ? 1 : 0)}")));
+        var csv = WarmedLaunch([.. creates, (60_000, "S,1,1,0.500")]);
+        var r = FrameLog.Read(FramesWithOneSlow(30_000, 100, 70_000), csv)!;
+        Assert.Equal([Enum.Parse<HitchCause>(cause)], r.Hitches.Select(h => h.Cause));
+    }
+
     /// <summary>A frame is play's by its end, in its cause, the play counts and the 1% low alike: one across the startup
     /// boundary that a compile fills is a shader stutter in play and the 1% low.</summary>
     [Fact]
@@ -485,9 +539,9 @@ public class FrameLogTests(ITestOutputHelper output) : IDisposable
     }
 
     /// <summary>An hour at 300 fps (the recorder's file is a few MB; a full benchmark is a few minutes) with 41,000 creates:
-    /// the game page's report and its graph columns in well under its budget (measured about 0.15 s).</summary>
+    /// the game page's report and its graph columns cost far less CPU than the budget (measured about 0.15 s).</summary>
     [Fact]
-    public void An_hour_of_frames_reads_within_its_budget()
+    public void An_hour_of_frames_reads_within_its_cpu_budget()
     {
         var rnd = new Random(1);
         var ends = new List<double>(1_080_001) { 0 };
@@ -498,13 +552,109 @@ public class FrameLogTests(ITestOutputHelper output) : IDisposable
         File.WriteAllLines(csv, ["#session,1000000,Game.exe", "#clock,0",
             .. Enumerable.Range(0, 41_000).Select(i => FormattableString.Invariant($"{i * 87.8:0.0},S,1,1,{(i % 10 == 0 ? 40 : 1.2):0.000},{i:x40},0.010,7,0"))]);
 
-        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var cpu = ThreadCpuTime();
         var r = FrameLog.Read(bin, csv, "Game.exe")!;
-        clock.Stop();
-        output.WriteLine($"{clock.ElapsedMilliseconds} ms, {r.Frames:N0} frames, {r.Hitches.Count} hitches");
+        cpu = ThreadCpuTime() - cpu;
+        output.WriteLine($"{cpu.TotalMilliseconds:0} ms cpu, {r.Frames:N0} frames, {r.Hitches.Count} hitches");
         Assert.Equal(1_080_000, r.Frames);
         Assert.Equal(FrameLog.GraphColumns, r.Peaks.Count);
         Assert.InRange(r.Peaks.Max(), 80, 280);   // each column keeps its longest frame: no spike averaged away
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"{clock.ElapsedMilliseconds} ms");
+        Assert.True(cpu < TimeSpan.FromSeconds(2), $"{cpu.TotalMilliseconds:0} ms cpu");
     }
+
+    /// <summary>A launch with frame generation, whose frames the recorder doesn't log, per second as its csv ran on AMD:
+    /// startup 0-8 s, quiet logos, the game's own precompile at 22.5-55 s (60 creates in its first half second, then 110 or
+    /// 310 a second, on 47 threads; 2,100 compiles of 100-819 ms), the title, a new game's loading screen at 126-132 s on 30
+    /// threads, the intro, then play from 383.5 s: 234 creates on 3 threads, 4 compiles of 100 ms or more.
+    /// <paramref name="presents"/>: the render thread has presented (a recorder that logs frames).</summary>
+    string PrecompileLaunch(bool presents)
+    {
+        var rows = new List<string> { "#session,1000000,SHf-Win64-Shipping.exe", "#clock,0.0" };
+        int key = 0;
+        static bool Spread(int i, int n, int k) => (long)(i + 1) * k / n > (long)i * k / n;   // k of n, evenly
+        static IEnumerable<double> Even(double from, double to, int n) => Enumerable.Range(0, n).Select(i => from + i * (to - from) / n);
+        void Span(IEnumerable<double> times, int compiles, Func<int, double> compileMs, Func<int, long> tid)
+        {
+            var ts = times.ToList();
+            for (int i = 0, j = 0; i < ts.Count; i++)
+            {
+                bool compile = Spread(i, ts.Count, compiles);
+                long t = tid(i);
+                rows.Add(FormattableString.Invariant($"{ts[i]:0.0},S,1,1,{(compile ? compileMs(j++) : 0.5):0.000},{key++:x40},0.010,{t},{(presents && t == 7 ? 1 : 0)}"));
+            }
+        }
+        Span(Even(0, 8000, 1820), 1525, j => 5 + j % 60, i => 100 + i % 31);
+        Span(Even(22_500, 23_000, 60).Concat(Enumerable.Range(23, 32).SelectMany(s => Even(s * 1000, s * 1000 + 999, (s % 2 == 0 ? 310 : 110) + (s == 54 ? 1 : 0)))),
+            6500, j => j == 0 ? 819 : Spread(j, 6500, 2100) ? 100 + j % 700 : 5 + j % 90, i => 1000 + i % 47);
+        Span(Even(77_000, 78_000, 20), 15, _ => 10, i => 7 + i % 3);
+        Span(Even(126_000, 132_000, 1917), 1100, j => 5 + j % 80, i => 2000 + i % 30);
+        Span(Even(140_000, 380_000, 27), 20, _ => 8, i => 7 + i % 2);
+        int[] slow = [120, 150, 200, 240];
+        Span(Even(383_500, 1_100_000, 234), 136, j => j % 34 == 0 ? slow[j / 34] : 5 + j % 40, i => 7 + i % 3);
+        rows.Add("#end,2200000,1200000.0");
+        var path = Path.Combine(_dir, "scskiller_creates.csv");
+        File.WriteAllLines(path, rows);
+        return path;
+    }
+
+    /// <summary>Without frames, a second of 100 creates or more on 8 threads or more, none that presents, is a precompile
+    /// or load, and so is a second next to one on such threads: its compiles count with the startup's, not play's. With
+    /// frames the same launch counts the same, and its slow frames there are loading.</summary>
+    [Fact]
+    public void A_precompile_or_load_after_startup_is_not_play()
+    {
+        var csv = PrecompileLaunch(presents: false);
+        var l = SessionLog.Read(csv, "SHf-Win64-Shipping.exe").Last!;
+        output.WriteLine($"{l.Compiles} in play (worst {l.WorstCompileMs} ms), {l.StartupCompiles} started or loaded, {l.FromGameLibrary + l.CacheHits} ready");
+        Assert.Equal((10_799L, 171L, 9_125L, 1_503L, 240.0), (l.Requests, l.Compiles, l.StartupCompiles, l.FromGameLibrary + l.CacheHits, l.WorstCompileMs));
+        // the first launch after a compile still counts every compile: what the compile left is what it measures
+        var first = SessionLog.Read(csv, "SHf-Win64-Shipping.exe", DateTimeOffset.FromUnixTimeMilliseconds(999_000)).First!;
+        Assert.Equal((1_503L, 9_296L), (first.Hits, first.Compiles));
+
+        csv = PrecompileLaunch(presents: true);
+        var bigs = SessionLog.Launches(csv).Single().Creates.Where(c => c.T > 383_000 && c.Ms >= 100).ToList();
+        var ends = new List<double> { 0 };
+        while (ends[^1] < 1_190_000)
+        {
+            double t = ends[^1], next = t + 16;
+            foreach (var from in new[] { 22_500.0, 126_000 }) if (t < from && next > from) next = from;
+            int big = bigs.FindIndex(c => c.T - c.Ms <= next && t < c.T);
+            // 4 fps behind the progress bar and the loading screen; one slow frame under each of play's long compiles
+            ends.Add(t is >= 22_500 and < 55_000 or >= 126_000 and < 132_000 ? t + 250 : big >= 0 ? bigs[big].T + 10 : next);
+        }
+        var bin = Path.Combine(_dir, FrameLog.FileName);
+        File.WriteAllBytes(bin, Launch(1_000_000, 0, ends));
+        var r = FrameLog.Read(bin, csv, "SHf-Win64-Shipping.exe")!;
+        Assert.Equal(TimeSpan.FromSeconds(8), r.Startup);
+        Assert.Equal(130 + 24, r.Hitches.Count(h => h.Cause == HitchCause.Loading));
+        Assert.Equal(bigs.Count, r.Hitches.Count(h => h.Cause == HitchCause.Shader));
+        Assert.Equal(130 + 24 + bigs.Count, r.Hitches.Count);
+        Assert.Equal(l, SessionLog.Read(csv, out var match, "SHf-Win64-Shipping.exe", frames: r).Last);
+        Assert.True(match);
+    }
+
+    /// <summary>Both the rate and the threads make a load: 99 creates a second on 8 threads, 100 on 7, or 100 with one on
+    /// the presenting thread stay play.</summary>
+    [Theory]
+    [InlineData(100, 8, 0, 0L)]
+    [InlineData(99, 8, 0, 297L)]
+    [InlineData(100, 7, 0, 300L)]
+    [InlineData(100, 8, 1, 300L)]
+    public void A_load_takes_its_rate_and_threads(int perSecond, int threads, int presenting, long play)
+    {
+        var csv = WarmedLaunch(Enumerable.Range(0, 3 * perSecond).Select(i => (30_000 + i * 1000.0 / perSecond,
+            FormattableString.Invariant($"S,0,0,20.000,{i:x40},0.010,{100 + i % threads},{(i % perSecond < presenting ? 1 : 0)}"))));
+        var l = SessionLog.Read(csv).Last!;
+        Assert.Equal((play, 3L * perSecond - play), (l.Compiles, l.StartupCompiles));
+    }
+
+    // Read runs synchronously on the calling thread, so this ignores machine load and other parallel tests.
+    static TimeSpan ThreadCpuTime()
+    {
+        GetThreadTimes(GetCurrentThread(), out _, out _, out var kernel, out var user);
+        return TimeSpan.FromTicks(kernel + user);
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32")] static extern nint GetCurrentThread();
+    [System.Runtime.InteropServices.DllImport("kernel32")] static extern bool GetThreadTimes(nint thread, out long create, out long exit, out long kernel, out long user);
 }

@@ -174,6 +174,45 @@ public class LinkStateTests
             Assert.Contains(log, l => l.StartsWith("warning: 1 stage sets and 0 DXIL libraries left out: the runtime won't serialize"));
             Assert.DoesNotContain(planned, s => s.ContainsValue(b.Sha1));
             Assert.True(planned.Any(s => s.ContainsValue(c.Sha1)), string.Join(" | ", log));
+            Assert.Equal((2L, 0L), (plan.Stats.StageSets, plan.Stats.LeftOut));   // b can't exist: not a stage set the game has
+        }
+    }
+
+    /// <summary>Static samplers follow the player's texture filtering setting. A shared recording with one player at 16x
+    /// anisotropic and another at 1x still verifies the rule when each record is checked with its own samplers, so a
+    /// shader no recording shows is planned instead of falling back to the learned lookup (FF7 Rebirth's community entry:
+    /// 1,267 of 20,983 records at 16x, a third of its stage sets left out).</summary>
+    [Fact]
+    public void RecordsOfOtherTextureFilteringSettingsStillVerifyTheRule()
+    {
+        var recorded = Enumerable.Range(0, 4).Select(i => new ShaderInfo($"{i:x}".PadLeft(40, 'a'), Stage.Compute, "cs_6_0", 0, new(0, 0, 0, 0), [], [], [])).ToList();
+        var unseen = new ShaderInfo(new string('e', 40), Stage.Compute, "cs_6_0", 0, new(0, 1, 0, 0), [new("srv", 0, 0, 1)], [], []);
+        var x16 = RootSig.StaticSamplers(RootSig.Rule.Ff7).ToArray();
+        for (var o = 0; o < x16.Length; o += 52)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(x16.AsSpan(o), 0x55);        // D3D12_FILTER_ANISOTROPIC
+            BinaryPrimitives.WriteUInt32LittleEndian(x16.AsSpan(o + 20), 16);     // MaxAnisotropy
+        }
+        var dir = Ff7.TempDir("linkstate-samplers");
+        var path = Path.Combine(dir, "recording.db");
+        using (var f = File.Create(path))
+            foreach (var samplers in new[] { RootSig.StaticSamplers(RootSig.Rule.Ff7), x16 })
+            {
+                var rs = RootSig.Serialize(RootSig.Build(RootSig.Rule.Ff7, new Dictionary<Stage, ShaderInfo> { [Stage.Compute] = recorded[0] }, true), samplers);
+                var h = Hex(System.Security.Cryptography.SHA1.HashData(rs));
+                WriteBlob(f, h, rs);
+                foreach (var cs in recorded) Write(f, 'C', Compute(h, cs.Sha1));
+            }
+        var all = recorded.Append(unseen).ToList();
+        var index = new ShaderIndex("synthetic", ["PCD3D_SM6"], all.ToDictionary(s => s.Sha1), [new ShaderMap("m", "Game", "PCD3D_SM6", all.Select(s => s.Sha1).ToList())]);
+        foreach (var caps in new[] { Ff7.Nvidia, Ff7.Amd })
+        {
+            var log = new List<string>();
+            var plan = new Planner().Build(Ff7.Game, Ue426, index, new Recording(path), caps, Path.Combine(dir, caps.Profile), new SyncLog(log.Add), CancellationToken.None);
+            Assert.Contains(log, l => l.Contains("root sigs rebuilt from shader counts: 8/8 exact -> building"));
+            Assert.Equal((true, 0L), (plan.Stats.RootSigRuleVerified, plan.Stats.LeftOut));
+            var planned = PlanFile.Read(plan.FilePath).Records.Where(r => r.Tag is 'C' or 'S' or 'P').Select(r => r.Tag == 'P' ? ParseItem(r.Payload).Stages : Parse(r).Stages);
+            Assert.Contains(planned, s => s.ContainsValue(unseen.Sha1));
         }
     }
 

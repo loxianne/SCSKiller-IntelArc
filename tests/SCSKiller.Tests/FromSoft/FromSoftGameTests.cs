@@ -38,7 +38,6 @@ public class FromSoftGameTests(ITestOutputHelper output)
     {
         var (game, version, api, keysInExe) = Games[key];
         if (!File.Exists(game.ExePath)) return;
-        Ff7.Codecs();
         // the app discovers the game with this exe (the reader keys on its name, the warm stages under it), not start_protected_game.exe
         Assert.Equal(game.ExePath, new SteamSource().Discover().Single(g => g.Id == game.Id).ExePath, ignoreCase: true);
         var data = Ff7.TempDir($"fromsoft-data-{key}");
@@ -111,7 +110,6 @@ public class FromSoftGameTests(ITestOutputHelper output)
         var (game, _, _, _) = Games[key];
         var warm = Path.Combine(Ff7.ProxyBin, "scskiller_warm.exe");
         if (Environment.GetEnvironmentVariable("SCSKILLER_WARP_TESTS") != "1" || !File.Exists(game.ExePath) || !File.Exists(warm)) return;
-        Ff7.Codecs();
         var reader = new FromSoftReader(Ff7.TempDir($"fromsoft-warp-data-{key}"));
         var engine = reader.Detect(game)!;
         var index = reader.Index(game, engine, null, CancellationToken.None);

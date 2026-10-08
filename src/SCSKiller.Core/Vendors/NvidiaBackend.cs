@@ -67,7 +67,7 @@ public sealed unsafe class NvidiaBackend : IGpuVendorBackend, IRefreshableGpu
     public GpuVendor Vendor => GpuVendor.Nvidia;
     public GpuInfo Gpu { get; private set; }
     public VendorCaps Caps { get; } = new("nvidia-1", CacheKeyedByExeName: true, StateIndependentCache: true, CacheSizeConfigurable: true,
-        PerStageCache: true,    // measured: a pipeline of stages cached in other pairings costs 0.40 ms, as an exact hit (gen/ab_perstage.py)
+        PerStageCache: true,    // measured: a pipeline of stages cached in other pairings costs 0.40 ms, as an exact hit
         RtCacheGranularity: RtCacheGranularity.Collection,   // selftest dxr: collections cached on their own; Jedi's recorded ones 42.7 -> 3.35 ms after synthesized ones
         PackageKeyed: true);
 

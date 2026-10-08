@@ -21,7 +21,6 @@ public class SynthesizedTemplateTests(ITestOutputHelper output)
     public void SynthesizedTemplatesHitTheDriverCache()
     {
         if (!Ff7.HasIndex || !Ff7.HasInstall) return;
-        Ff7.Codecs();
         var dir = Ff7.TempDir("synth");
         var (reader, engine, index) = Ff7.Installed(); // indexed once per run, shared with the planner tests
         var planner = new Planner();
@@ -150,6 +149,7 @@ public class SynthesizedTemplateTests(ITestOutputHelper output)
         File.Copy(Path.Combine(Path.GetDirectoryName(Selftest)!, "d3d12.dll"), Path.Combine(work, "d3d12.dll"), true);
         var psi = new ProcessStartInfo(Path.Combine(work, exe), ["debugwarm", "1"]) { RedirectStandardOutput = true, UseShellExecute = false };
         psi.Environment["SCSKILLER_THREADS"] = "4";
+        psi.Environment["SCSKILLER_SELFTEST_UNARMED"] = "1";   // a warm host: the proxy admits it unarmed
         string o;
         using (var p = Process.Start(psi)!) { o = p.StandardOutput.ReadToEnd(); p.WaitForExit(); }
         var m = Regex.Match(o, @"replayed ok=(\d+) fail=(\d+)");

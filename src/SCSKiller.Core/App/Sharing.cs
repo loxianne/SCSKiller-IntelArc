@@ -8,7 +8,7 @@ using SCSKiller.Core.Planning;
 
 namespace SCSKiller.Core.App;
 
-/// <summary>The upload's X-SCSK-Upload header (docs/db-contract.md "Anonymous uploads"), sent as base64url of snake_case
+/// <summary>The upload's X-SCSK-Upload header, sent as base64url of snake_case
 /// JSON.</summary>
 public sealed record UploadMeta(string StoreBuildKey, string ContentHash, string? Engine = null, string? Vendor = null, string? AppVersion = null,
     UploadDll[]? Middleware = null);
@@ -21,14 +21,14 @@ public sealed record UploadDll(string Name, string Sha1);
 /// last upload, if any (<see cref="Psos"/> / <see cref="NewPsos"/>: summed over its uploads).</summary>
 public sealed record SharedRecording(string Stamp, DateTimeOffset? At = null, string? UploadId = null, int Psos = 0, int NewPsos = 0, string[]? Sent = null);
 
-/// <summary>The write side of the community database (docs/plan-db.md §3 "Upload flow", docs/db-contract.md): a game's own
+/// <summary>The write side of the community database: a game's own
 /// recording (recording.db, never the merge with the community's), stripped to its hash-only form, posted with an anonymous
 /// upload device's token. That device is registered once (POST /v1/devices) and kept DPAPI-protected in upload.dat, apart
 /// from the Patreon sign-in (auth.dat), which this class never sees. Works signed out. Quiet: failures
 /// land in <see cref="Problem"/> and back off; nothing throws but cancellation.</summary>
 public sealed class Sharing
 {
-    public const int MaxBody = 4 << 20;   // = the edge's cap (db-contract.md)
+    public const int MaxBody = 4 << 20;   // = the server's cap
     // One upload: real sessions run 0.8 to 1 KB a record hash-only, so ~20 MB and well under the origin's default 32 MB
     public const int ChunkRecords = 20_000;
     public const long ChunkRaw = 24 << 20;
@@ -177,7 +177,7 @@ public sealed class Sharing
 
     /// <summary>Uploads each pack of a shared vendor (<see cref="Middleware.SharedVendors"/>) in <paramref name="packsDir"/>
     /// (this PC's own, filled from its recordings on the GPU vendor <paramref name="gpu"/>: <see cref="MiddlewarePack.PackHeader.Gpu"/>)
-    /// that changed since its last upload, under its pack key for that vendor (docs/db-contract.md "Middleware packs"), when sharing is on. Stamped per pack file in
+    /// that changed since its last upload, under its pack key for that vendor, when sharing is on. Stamped per pack file in
     /// packs-shared.json, so a pack goes again only once it gains records. Returns the DLL name and PSO count of each upload.</summary>
     /// <paramref name="layered"/>: the records a layer made (<see cref="MiddlewarePacks.LayerMade"/>), read again before each
     /// pack's payload and never in an upload whatever a pack holds; one that can't be read ends the pass.

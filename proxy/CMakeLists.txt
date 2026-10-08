@@ -74,6 +74,6 @@ if(EXISTS ${AGS_DLL})
 endif()
 
 # D3D11 driver-cache measurement probe. Standalone: talks to system d3d11.dll directly, no SCSKiller shim involved.
-# Also the "game" of gen/test_warm11.py (compile, first).
+# Also the "game" of the D3D11 warm end-to-end test (compile, first).
 add_executable(probe11 probe11.cpp)
 target_link_libraries(probe11 d3dcompiler)

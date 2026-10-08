@@ -46,6 +46,23 @@ public static class D3DSCache
     // ponytail: never pruned, a deleted folder's entry stays until the app restarts (a few MB at 14,000 folders)
     static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Stamp, HashSet<string> Paths)> DbPaths = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Folders in <paramref name="root"/> created since <paramref name="since"/> whose dbs name only exes under
+    /// <paramref name="dir"/>; one in doubt (an unreadable db, no path) is never one. Only those new folders' dbs are read.</summary>
+    public static IReadOnlyList<string> Made(string root, string dir, DateTime since)
+    {
+        var under = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir)) + Path.DirectorySeparatorChar;
+        var found = new List<string>();
+        if (!Directory.Exists(root)) return found;
+        foreach (var d in new DirectoryInfo(root).EnumerateDirectories().Where(d => d.CreationTimeUtc >= since.ToUniversalTime().AddSeconds(-2)))
+            try
+            {
+                if (ExePaths(d.FullName) is { Count: > 0 } paths && paths.All(p => p.StartsWith(under, StringComparison.OrdinalIgnoreCase)))
+                    found.Add(d.FullName);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return found;
+    }
+
     /// <summary>Null when a db can't be read.</summary>
     public static HashSet<string>? ExePaths(string dir)
     {

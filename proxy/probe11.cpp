@@ -13,10 +13,10 @@
 //                       cross-process); vsSeed2/psSeed2 are fresh. Draws: seen-VS+fresh-PS,
 //                       fresh-VS+seen-PS, both-seen (default layout), both-seen (new layout).
 //                       Answers whether the driver caches per shader stage or per VS+PS pair.
-//   compile <file.hlsl> <target> <out.bin> - D3DCompile a file ("main"), write the bytecode (gen/test_warm11.py).
+//   compile <file.hlsl> <target> <out.bin> - D3DCompile a file ("main"), write the bytecode.
 //   first <vs.bin> <ps.bin> - time the first draw of given bytecode (a VS with POSITION float3 + TEXCOORD0 float2
 //                       inputs, a PS with up to 4 textures, 1 sampler, 1 float4 cbuffer). ~17 ms cold, ~1 ms when
-//                       the driver cache already holds both (gen/test_warm11.py: warmed by scskiller_warm).
+//                       the driver cache already holds both (warmed by scskiller_warm).
 //   firsttess <vs.bin> <hs.bin> <ds.bin> <ps.bin> - the same draw through a hull and a domain shader (3-point patches).
 // No args: orchestrator. Runs the child under itself and copies of itself (same/other exe name,
 // same/other folder), 3x with fresh seeds each, and prints medians.

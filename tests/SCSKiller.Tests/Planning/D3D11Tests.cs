@@ -115,7 +115,6 @@ public class D3D11Tests(ITestOutputHelper output)
         try { game = new SteamSource().Discover().FirstOrDefault(g => g.Name == name); }
         catch (Exception) { return; } // no Steam
         if (game == null) return;
-        Ff7.Codecs();
         var data = Ff7.TempDir("d3d11-" + name.Split(' ')[0]);
         var reader = new EngineReaders(("Unreal", new UnrealReader(data)), (CarvedReader.Family, new CarvedReader())); // the app's chain
         var e = reader.Detect(game)!;

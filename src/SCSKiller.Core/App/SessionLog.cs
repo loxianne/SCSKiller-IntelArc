@@ -8,12 +8,13 @@ namespace SCSKiller.Core.App;
 /// <see cref="At"/>.</summary>
 public sealed record LaunchedExe(string Name, DateTimeOffset At);
 
-/// <summary>Reads the proxy's scskiller_creates.csv (t_ms,kind,known,tuple_known,ms, then in newer proxies key,proxy_ms,
-/// which this reader ignores; appended per game launch, t_ms restarts at each launch). Lowercase kind = loaded from the
+/// <summary>Reads the proxy's scskiller_creates.csv (t_ms,kind,known,tuple_known,ms, then in newer proxies key,proxy_ms,tid,presents;
+/// appended per game launch, t_ms restarts at each launch). Lowercase kind = loaded from the
 /// game's own pipeline library; a create over 3 ms is a real driver compile (but a RayQuery PSO's floor, see
 /// <see cref="RayQueryFloorMs"/>), under it a cache hit. Kinds 'R' / 'A' (ray
 /// tracing state objects) are counted apart: compiled from <see cref="StateObjectCompileMs"/>, else ready. Compiles during
-/// the launch's startup (<see cref="FrameLog.StartupEnd"/>, the frame report's rule) are counted apart too. Newer proxies bracket each launch with <c>#session,&lt;unix_ms&gt;,&lt;exe&gt;</c> and <c>#end,&lt;unix_ms&gt;</c>
+/// the launch's startup (<see cref="FrameLog.StartupEnd"/>, the frame report's rule) or a load or precompile after it
+/// (<see cref="FrameLog.LoadSeconds"/>) are counted apart too. Newer proxies bracket each launch with <c>#session,&lt;unix_ms&gt;,&lt;exe&gt;</c> and <c>#end,&lt;unix_ms&gt;</c>
 /// (missing after a crash, and whenever the game terminates its own process, as Unreal does); other <c>#</c> lines are ignored. The #session exe is
 /// GetModuleFileNameW(NULL)'s file name inside the game process: the name exactly as launched (measured: a process started
 /// as CASEPROBE.EXE from the file caseProbe.exe has CASEPROBE.EXE there, while its kernel image name and
@@ -34,33 +35,35 @@ public static class SessionLog
         public long? Start => launch.Start;
         public long? End => launch.End;
         public bool OtherExe;
-        public List<(double T, char Kind, double Ms, string? Key)> Creates => launch.Creates;
+        public List<(double T, char Kind, double Ms, string? Key, long? Tid, bool Presents)> Creates => launch.Creates;
         public double LastT => Creates.Count > 0 ? Creates[^1].T : double.NegativeInfinity;
 
         public long Hits, Compiles, StartupCompiles, Library, RayQuery, SoReady, SoCompiled, SoStartupCompiled;
         public double Worst;
 
-        /// <summary>Compiles that end by <paramref name="startup"/> (<see cref="FrameLog.InStartup"/>) count in StartupCompiles (state objects in
-        /// SoStartupCompiled), and Worst is of the creates after it.</summary>
-        public Session Count(IReadOnlySet<string>? rayQuery, double startup = double.NegativeInfinity)
+        /// <summary>Compiles that end by <paramref name="startup"/> (<see cref="FrameLog.InStartup"/>) or in one of
+        /// <paramref name="loads"/> (<see cref="FrameLog.InLoad"/>) count in StartupCompiles (state objects in SoStartupCompiled),
+        /// and Worst is of the other creates.</summary>
+        public Session Count(IReadOnlySet<string>? rayQuery, double startup = double.NegativeInfinity, IReadOnlySet<long>? loads = null)
         {
+            bool Started(double t) => FrameLog.InStartup(t, startup) || loads != null && FrameLog.InLoad(t, loads);
             Hits = Compiles = StartupCompiles = Library = RayQuery = SoReady = SoCompiled = SoStartupCompiled = 0;
             Worst = 0;
-            foreach (var (t, kind, ms, key) in Creates)
+            foreach (var (t, kind, ms, key, _, _) in Creates)
             {
                 if (!char.IsUpper(kind)) { Library++; continue; }
                 if (kind is 'R' or 'A')
                 {
                     if (ms < StateObjectCompileMs) SoReady++;
-                    else if (FrameLog.InStartup(t, startup)) SoStartupCompiled++;
+                    else if (Started(t)) SoStartupCompiled++;
                     else SoCompiled++;
                     continue;
                 }
                 if (ms > CompileMs && ms <= RayQueryFloorMs && key != null && rayQuery?.Contains(key) == true) { RayQuery++; continue; }
                 if (ms <= CompileMs) Hits++;
-                else if (FrameLog.InStartup(t, startup)) StartupCompiles++;
+                else if (Started(t)) StartupCompiles++;
                 else Compiles++;
-                if (!FrameLog.InStartup(t, startup)) Worst = Math.Max(Worst, ms);
+                if (!Started(t)) Worst = Math.Max(Worst, ms);
             }
             return this;
         }
@@ -72,7 +75,8 @@ public static class SessionLog
         {
             double lastFrame = frames?.Duration.TotalMilliseconds ?? 0;   // the caller passes only this launch's
             double end = FrameLog.SessionEnd(launch, lastFrame, played);
-            Count(rayQuery, FrameLog.StartupEnd(Creates, rayQuery, end));
+            Count(rayQuery, FrameLog.StartupEnd(Creates.Select(c => (c.T, c.Kind, c.Ms, c.Key)), rayQuery, end),
+                FrameLog.LoadSeconds(Creates.Select(c => (c.T, c.Tid, c.Presents))));
             return new(TimeSpan.FromMilliseconds(end), Creates.Count, Library, Hits, Compiles, Worst, RayQuery, SoReady, SoCompiled, StartupCompiles, SoStartupCompiled);
         }
 
@@ -154,7 +158,7 @@ public static class SessionLog
         public long? Start, End;   // the #session and #end stamps (unix ms)
         public double? StartT, EndT;   // the same instants on the recorder's clock (t_ms); null from an older proxy
         public string Exe = "";
-        public readonly List<(double T, char Kind, double Ms, string? Key)> Creates = [];
+        public readonly List<(double T, char Kind, double Ms, string? Key, long? Tid, bool Presents)> Creates = [];   // Tid null: an older proxy
     }
 
     /// <summary>The csv's launches, the one split both reports use: a <c>#session</c> line opens one; rows before any, after
@@ -195,7 +199,8 @@ public static class SessionLog
                 if (cur != null) yield return Sorted(cur);
                 cur = new CsvLaunch();
             }
-            cur.Creates.Add((t, f[1][0], ms2, f.Length > 5 ? f[5] : null));
+            cur.Creates.Add((t, f[1][0], ms2, f.Length > 5 ? f[5] : null,
+                f.Length > 8 && long.TryParse(f[7], CultureInfo.InvariantCulture, out var tid) ? tid : null, f.Length > 8 && f[8] == "1"));
         }
         if (cur != null) yield return Sorted(cur);
 

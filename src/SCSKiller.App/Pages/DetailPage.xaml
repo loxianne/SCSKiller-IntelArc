@@ -89,8 +89,10 @@
                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
                         <TextBlock Text="{x:Bind Vm.StatusTitle, Mode=OneWay}" Style="{x:Bind Vm.Row.StatusStyle, Mode=OneWay}" FontSize="20" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind Vm.StatusReason, Mode=OneWay}" Style="{StaticResource Secondary}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Vm.GuessNote, Mode=OneWay}" Visibility="{x:Bind Vm.HasGuessNote, Mode=OneWay}" Style="{StaticResource Secondary}" TextWrapping="Wrap" />
                     </StackPanel>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Button Content="Why?" Click="OnPartlyWhy" Visibility="{x:Bind Vm.IsPartlyCompiled, Mode=OneWay}" />
                         <Button Click="{x:Bind Vm.RefreshGame}" IsEnabled="{x:Bind Vm.CanRefresh, Mode=OneWay}" AutomationProperties.Name="Refresh"
                                 ToolTipService.ToolTip="Re-read this game's cache size, recording and last session">
                             <FontIcon Glyph="&#xE72C;" FontSize="14" />
@@ -120,6 +122,19 @@
                     <FontIcon Glyph="&#xE7BA;" FontSize="16" Foreground="{ThemeResource WarnBrush}" VerticalAlignment="Center" />
                     <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center">
                         <Run Text="Known to stutter" Foreground="{ThemeResource WarnBrush}" FontWeight="SemiBold" /><Run Text=" · " /><Run Text="{x:Bind Vm.StutterReason, Mode=OneWay}" /><Run Text="  " /><Run Text="{x:Bind Vm.StutterCitation, Mode=OneWay}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /><Hyperlink NavigateUri="{x:Bind Vm.StutterUri, Mode=OneWay}"><Run Text="{x:Bind Vm.StutterLinkText, Mode=OneWay}" /></Hyperlink>
+                    </TextBlock>
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource Card}" Padding="20,10" Visibility="{x:Bind Vm.IsNoStutter, Mode=OneWay}">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Glyph="&#xE73E;" FontSize="16" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center">
+                        <Run Text="No shader stutter" FontWeight="SemiBold" /><Run Text=" · " /><Run Text="{x:Bind Vm.NoStutterReason, Mode=OneWay}" /><Run Text=". Compiling it isn't needed." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </TextBlock>
                 </Grid>
             </Border>
@@ -187,9 +202,11 @@
                                     <TextBlock Text="{x:Bind Vm.TimeLabel, Mode=OneWay}" Style="{StaticResource Secondary}" />
                                     <TextBlock Text="{x:Bind Vm.TimeValue, Mode=OneWay}" Style="{StaticResource StatValue}" />
                                 </StackPanel>
-                                <StackPanel Spacing="2" Visibility="{x:Bind Vm.HasDiskValue, Mode=OneWay}">
+                                <StackPanel Spacing="2" Visibility="{x:Bind Vm.HasDiskValue, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind Vm.DiskInUse, Mode=OneWay}">
                                     <TextBlock Text="{x:Bind Vm.DiskLabel, Mode=OneWay}" Style="{StaticResource Secondary}" />
                                     <TextBlock Text="{x:Bind Vm.DiskValue, Mode=OneWay}" Style="{StaticResource StatValue}" />
+                                    <!-- NVIDIA pre-sizes its files in powers of two: the filled part, under the size on disk -->
+                                    <TextBlock Text="{x:Bind Vm.DiskInUseShort, Mode=OneWay}" Style="{StaticResource Secondary}" Visibility="{x:Bind Vm.HasDiskInUse, Mode=OneWay}" />
                                 </StackPanel>
                                 <StackPanel Spacing="2" Visibility="{x:Bind Vm.HasSession, Mode=OneWay}">
                                     <TextBlock Text="{x:Bind Vm.StuttersLabel, Mode=OneWay}" Style="{StaticResource Secondary}" />

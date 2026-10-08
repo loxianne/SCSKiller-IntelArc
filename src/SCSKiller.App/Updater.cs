@@ -6,14 +6,15 @@ using Velopack.Sources;
 
 namespace SCSKiller.App;
 
-/// <summary>Velopack in the app (docs/patreon-and-updates.md §4.5). Checks at start and every hour and downloads in the
+/// <summary>Velopack in the app. Checks at start and every hour and downloads in the
 /// background (nothing touches the install); applies only while no queue item runs anywhere (<see cref="Busy"/>): on
 /// "Restart to update", and with <see cref="AutoInstall"/> on at the next start or at the tray's Quit. A build Velopack
 /// didn't install (dev, the zip) never checks.</summary>
 public static class Updater
 {
     static readonly SemaphoreSlim One = new(1, 1);
-    static readonly string DataDir = AppStore.DefaultDir;
+    // no static here may build an UpdateManager: one needs Velopack's locator, which UpdateHooks.Run sets
+    static readonly string DataDir = UpdateHooks.DataDir;
     static readonly FeedTrust Trust = new(new AppStore(DataDir), FeedTrust.ReleaseKeys);
     static string ResumeFile => Path.Combine(DataDir, "resume-queue.txt");
 
@@ -69,7 +70,8 @@ public static class Updater
         }, s);
     }
 
-    static void Log(string line) => ScsKiller.AppendLog(DataDir, "updates.log", line);
+    static void Log(string line) => UpdateHooks.Log(line);
+
     public static bool Checking { get; private set; }
     /// <summary>While <see cref="Checking"/>: the version whose package is being downloaded.</summary>
     public static string? Downloading { get; private set; }
@@ -143,10 +145,16 @@ public static class Updater
             if (Usable(ready) is null) return Undo("The update channel changed meanwhile. Restart to update again once it is ready.");
             if (still?.Invoke() == false) return Undo(null);
             if (OfflineBlocks()) return Undo(OfflineRunning);
+            Log($"Handing the update to {r.Version} to Update.exe");
             apply(m, r);   // its preparation too (the resume file): a failure anywhere is undone below
             return true;
         }
-        catch (Exception e) { return Undo("Couldn't hand the update to the installer: " + e.Message); }
+        catch (Exception e)
+        {
+            var undone = Undo("Couldn't hand the update to the installer: " + e.Message);   // the marker first, whatever the log does
+            Log($"Handing the update to Update.exe failed: {e}");
+            return undone;
+        }
         finally
         {
             One.Release();
@@ -172,7 +180,9 @@ public static class Updater
 
     const string OfflineRunning = "An offline session's game or cleanup is running. The update installs once it has ended.";
 
-    public static bool Installed { get; } = Manager(UpdateChannels.Stable, false).IsInstalled;
+    /// <summary>Read on first use, after UpdateHooks.Run; a failure isn't kept, the next use tries again.</summary>
+    public static bool Installed => installed.Value;
+    static readonly Lazy<bool> installed = new(() => Manager(UpdateChannels.Stable, false).IsInstalled, LazyThreadSafetyMode.PublicationOnly);
 
     /// <summary>At app start (real data only): check soon and every hour.</summary>
     public static void Start()
@@ -197,6 +207,7 @@ public static class Updater
                 case StartStep.Failed: Log($"The update to {d.S.Version} didn't install: {AppVersion.Current} started instead. It waits for Restart to update or a quit."); break;
                 case StartStep.Older: Stage(null); break;
                 case StartStep.Installed:
+                    Log($"Updated to {AppVersion.Current}");
                     Stage(null);
                     if (marked) ClearMarker();   // the swap was done; only its hook didn't run
                     marked = false;
@@ -258,6 +269,7 @@ public static class Updater
             // version while the channels differ
             if (found is not { } info || info.TargetFullRelease.Version == m.CurrentVersion)
             {
+                Log($"Checked {channel}: up to date ({m.CurrentVersion})");
                 UpToDate = true;
                 if (ready?.Channel == channel && !SignedFeedSource.Partial) Stage(null);   // its feed no longer offers it: a release taken back isn't installed
             }
@@ -268,24 +280,36 @@ public static class Updater
                     Downloading = info.TargetFullRelease.Version.ToString();
                     Changed?.Invoke();
                 }
+                Log($"Checked {channel}: {info.TargetFullRelease.Version} is available");
                 await m.DownloadUpdatesAsync(info);   // a package already whole on disk is not fetched again
                 var t = info.TargetFullRelease;
+                Log($"Downloaded {t.Version} ({t.FileName})");
                 if (channel == Chosen()) Stage(new(m, t, new(channel, t.Version.ToString(), t.FileName, t.Size, t.SHA256, SignedFeedSource.Fetched)));   // the choice may have changed meanwhile
             }
         }
-        catch (FeedRejectedException e) { Problem = "The update feed failed its signature check: " + e.Message; }
+        catch (FeedRejectedException e)
+        {
+            Log($"The update feed failed its signature check: {e.Message}");
+            Problem = "The update feed failed its signature check: " + e.Message;
+        }
         catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { Problem = null; failures = 0; }   // no feed published on this channel yet
         catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
         {
+            Log("The update server asked SCSKiller to wait (429)");
             Problem = asked ? "The update server asked SCSKiller to wait. It checks again by itself later." : null;
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or IOException)
         {
+            Log($"Couldn't check for updates: {e.GetType().Name}: {e.Message}");
             // offline or a hiccup: the next check retries; say so only once it has kept failing for a day
             Problem = ++failures >= 24 ? "Couldn't reach the update server for a while. SCSKiller keeps trying."
                 : asked ? "Couldn't reach the update server. SCSKiller tries again within the hour." : null;
         }
-        catch (Exception) { Problem = "Couldn't check for updates right now."; }
+        catch (Exception e)
+        {
+            Log($"Couldn't check for updates: {e}");
+            Problem = "Couldn't check for updates right now.";
+        }
         finally
         {
             (Checking, Downloading, asked) = (false, null, false);
@@ -345,13 +369,16 @@ public static class Updater
             if (Busy.IsHeld())
             {
                 Problem = "The background rebuild after a driver update is compiling. The update installs when SCSKiller quits after it has finished.";
+                Log($"Restart to update: {Problem}");
                 return false;
             }
-            return applied = await ApplyAsync(Timeout.InfiniteTimeSpan, (m, r) =>
+            applied = await ApplyAsync(Timeout.InfiniteTimeSpan, (m, r) =>
             {
                 if (queued.Count > 0) File.WriteAllLines(ResumeFile, queued);
                 m.ApplyUpdatesAndRestart(r);   // exits this process
             });
+            if (!applied) Log($"Restart to update didn't install it: {Problem}");
+            return applied;
         }
         finally
         {
@@ -372,24 +399,6 @@ public static class Updater
         foreach (var id in ids.Where(id => App.Core.Games.Any(g => g.Game.Id == id))) App.Core.Enqueue(id);
         App.Core.StartQueue();
     }
-
-    /// <summary>Velopack's lifecycle hooks (Program.Main, before anything else): run by Update.exe, fast, then exit.</summary>
-    public static void RunHooks() => VelopackApp.Build()
-        .SetAutoApplyOnStartup(false)   // it takes the newest package on disk, any channel, before any Busy or offline check, and force-stops every process under the install root
-        .OnAfterInstallFastCallback(_ =>
-        {
-            // a zip install's driver-update task points at the zip's folder: move it here (current\ keeps its name across updates)
-            if (ScheduledTask.Registered && ScheduledTask.TaskExe() is { } exe) ScheduledTask.Register(exe);
-        })
-        .OnAfterUpdateFastCallback(_ => Busy.ClearApplying(DataDir))   // the swap is done: the CLI may run again
-        .OnBeforeUninstallFastCallback(_ =>
-        {
-            // installer.md §5. Kept: the data dir (recordings, settings).
-            ScheduledTask.Unregister();
-            if (Environment.ProcessPath is { } app) WindowsStartup.Apply(false, app);
-            ScsKiller.RemoveAllRecorders(new AppStore(DataDir));
-        })
-        .Run();
 
     /// <summary>The signed feed (§4.3): releases.&lt;channel&gt;.json is used only after <see cref="FeedTrust"/> accepts its
     /// .sig; each package is fetched from its own version's channel (<see cref="UpdateFeeds.Package"/>), and Velopack then

@@ -23,7 +23,6 @@ public class UnrealKeysTests(ITestOutputHelper output)
     public void KeyFoundStaticallyStoredAndReused()
     {
         if (Installed("Windrose Demo") is not { } game) return;
-        Ff7.Codecs();
         var data = Ff7.TempDir("keys-windrose");
         var sw = Stopwatch.StartNew();
         var e = new UnrealReader(data).Detect(game, out var notes)!;
@@ -52,7 +51,6 @@ public class UnrealKeysTests(ITestOutputHelper output)
     public void KeyFoundWhenAnImmediateEndsInARexByte()
     {
         if (Installed("Sparking! ZERO") is not { } game) return;
-        Ff7.Codecs();
         var data = Ff7.TempDir("keys-dbsz");
         var exe = new FileInfo(game.ExePath);
         Directory.CreateDirectory(Path.Combine(data, "games", "steam_1790600"));
@@ -70,7 +68,6 @@ public class UnrealKeysTests(ITestOutputHelper output)
     public void ProtectedExeIsReportedAndNotRescanned()
     {
         if (Installed("Mafia: The Old Country") is not { } game) return;
-        Ff7.Codecs();
         var data = Ff7.TempDir("keys-mafia");
         var e = new UnrealReader(data).Detect(game, out var notes)!;
         output.WriteLine($"{e}\n{notes}");

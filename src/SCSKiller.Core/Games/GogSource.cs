@@ -22,7 +22,7 @@ public sealed class GogSource : IGameSource
             using var key = root.OpenSubKey(id);
             if (key?.GetValue("path") is not string install || !Directory.Exists(install)) continue;
             var infoPath = Path.Combine(install, $"goggame-{id}.info");
-            string name = (key.GetValue("gameName") as string) ?? Path.GetFileName(install.TrimEnd('\\'));
+            string name = (key.GetValue("gameName") as string) ?? GameFiles.FolderName(install);
             string? exe = null, version = null;
             if (File.Exists(infoPath))
             {

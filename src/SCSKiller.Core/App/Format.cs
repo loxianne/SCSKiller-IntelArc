@@ -16,6 +16,11 @@ public static class Format
     /// <summary><see cref="ScsKiller.Duration"/>; a dash for null.</summary>
     public static string Duration(TimeSpan? t) => t is { } v ? ScsKiller.Duration(v) : Dash;
 
+    /// <summary>"Carved DXBC", "Unity 2022.3.10"; just the family (or <paramref name="family"/>) when the reader found no
+    /// version: Carved and FromSoft say "-", Unity "?".</summary>
+    public static string Engine(EngineInfo e, string? family = null) =>
+        e.Version is "" or "-" or "?" ? family ?? e.Family : $"{family ?? e.Family} {e.Version}";
+
     /// <summary>The item is being compiled: any stage before it finishes, paused included.</summary>
     public static bool Running(QueueItem q) => q.Stage is QueueStage.Indexing or QueueStage.Planning or QueueStage.Materializing
         or QueueStage.Warming or QueueStage.Paused;
@@ -45,17 +50,24 @@ public static class Format
         var partly = ScsKiller.IsPartlyWarmed(s);
         return s.Status switch
         {
+            _ when s.CompileUnreached => "This game needs a custom loader",
+            GameStatus.Warmed when ScsKiller.IsPartlyCompiled(s) => Sentence(ScsKiller.PartlyCompiledNote(s)),
             GameStatus.Warmed when partly => $"Driver {s.WarmedDriverVersion} · {s.Careful!.LaunchCompiled * 100:0}% still compiled",
-            GameStatus.Warmed when ScsKiller.RtAfterRecording(s) => s.RecorderInstalled ? "Recorder on: play with ray tracing"
+            GameStatus.Warmed when ScsKiller.RtAfterRecording(s) && s.NoStutter == null => s.RecorderInstalled ? "Recorder on: play with ray tracing"
                 : ScsKiller.RecordedEnough(s) ? "Ray tracing needs a recording" : "Ray tracing needs a 5-min recording",
+            GameStatus.Warmed when ScsKiller.BothApis(s.Plan) => "DirectX 11 and 12" + (ScsKiller.IsPartial(s.Plan) ? " · partly covered" : ""),
             GameStatus.Warmed => $"Driver {s.WarmedDriverVersion}" + (ScsKiller.IsPartial(s.Plan) ? " · partly covered" : ""),
             GameStatus.Stale => StaleNote(r),
+            GameStatus.NeedsRecording when r == ScsKiller.OfflineSessionNote => r,
+            GameStatus.NeedsRecording when s.NoStutter != null && !s.RecorderInstalled => "Compiling isn't needed",
             GameStatus.NeedsRecording when s.RecordingPaused => "Recording paused: limit reached",
-            GameStatus.NeedsRecording when s.RecorderInstalled && !ScsKiller.RecordedEnough(s) => "Recorder on: play 5 minutes",
+            GameStatus.NeedsRecording when ScsKiller.NeverRecorded(s) => null,   // the title: ScsKiller.NothingRecordedTitle
+            GameStatus.NeedsRecording when s.RecorderInstalled && !ScsKiller.RecordedEnough(s) => Has(Planning.Planner.Dx12Only) ? "Recorder on: play on DirectX 12" : "Recorder on: play 5 minutes",
             GameStatus.NeedsRecording when Starts(ScsKiller.RtNeedsRecording) => "For ray-traced effects" + (s.InCommunityDb == true ? " · in the community database" : ""),
             GameStatus.NeedsRecording when s.InCommunityDb == true => "In the community database",
             GameStatus.NeedsRecording when Starts("the recording has no draws") => "Play into the game world",
             GameStatus.NeedsRecording when s.RecorderInstalled => Sentence(FirstClause(r)),
+            GameStatus.NeedsRecording when s.RecorderSkip != null => "Recorder not available",
             GameStatus.NeedsRecording => "Turn on Record and play",
             GameStatus.Ready when Has("ray-traced effects aren't compiled") => s.AntiCheat == AntiCheat.None ? "Ray tracing not compiled" : $"Ray tracing blocked by {AntiCheatName(s.AntiCheat)}",
             GameStatus.Ready when Has(ScsKiller.RtUnseenNote) => "No ray tracing seen while recording",
@@ -77,6 +89,18 @@ public static class Format
             _ => Sentence(FirstClause(r)),
         };
     }
+
+    /// <summary>A shader mod that doesn't block the game, after its reason: "; RenoDX changes this game's pipelines: ...".
+    /// None for an unsupported game: its status and reason alone.</summary>
+    public static string ModNote(GameState s) =>
+        s is { ShaderMod: not null, ShaderModBlocks: false } && s.Status != GameStatus.Unsupported ? "; " + ScsKiller.ShaderModNote(s) : "";
+
+    /// <summary>The game page's note after the reason when an NVIDIA cache file is nearly full; none for an unsupported game.</summary>
+    public static string CacheFileNote(GameState s) => s.CacheFileFull && s.Status != GameStatus.Unsupported ? ". " + Sentence(ScsKiller.CacheFileFullNote) : "";
+
+    /// <summary>Recorder in, not long enough yet: the DirectX 12 hint stays, a DirectX 11 run never loads the recorder.</summary>
+    public static string RecorderOnNote(GameState s) => "recorder on: play for about 5 minutes"
+        + (s.StatusReason.Contains(Planning.Planner.Dx12Only, StringComparison.Ordinal) ? ", " + Planning.Planner.Dx12Only : "");
 
     static string StaleNote(string r) =>
         r.StartsWith("driver changed:", StringComparison.Ordinal) ? $"Driver {r[(r.LastIndexOf(' ') + 1)..]} cleared its cache"

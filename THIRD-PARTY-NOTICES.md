@@ -1,6 +1,6 @@
 ﻿# Third-party notices
 
-SCSKiller ships, downloads or embeds the components below. Each row names its licence (SPDX id) and links to the full licence text further down; identical texts are listed once. Versions are the resolved NuGet packages (`dotnet list package --include-transitive`), the native files in the distribution (`build/publish.ps1`) and the data the code embeds.
+SCSKiller ships, downloads or embeds the components below, at the versions in the distribution. Each row names its licence (SPDX id) and links to its text below, where identical texts are listed once.
 
 SCSKiller's own licence: GPL-3.0-or-later (LICENSE), with an additional permission under section 7 for Oodle, the Windows App SDK and graphics driver libraries (LICENSE-EXCEPTION.txt).
 
@@ -53,18 +53,18 @@ SCSKiller's own licence: GPL-3.0-or-later (LICENSE), with an additional permissi
 - **.NET runtime (self-contained)**: Its own third-party notices ship as notices\dotnet-THIRD-PARTY-NOTICES.txt.
 - **Windows App SDK (Runtime 2.5.1, WinUI 2.3.9, Foundation 2.3.12, Base 2.0.4, Interactive Experiences 2.1.9)**: Its notices ship as notices\WindowsAppSDK-NOTICE.txt and notices\WinUI-NOTICE.txt.
 - **Microsoft Edge WebView2 SDK**: Its notices ship as notices\WebView2-NOTICE.txt.
-- **Microsoft.Windows.SDK.NET (C#/WinRT projection, WinRT.Runtime)**: Part of the .NET SDK's Windows targeting pack. The package has no licence file; its terms are at https://aka.ms/WinSDKLicenseURL.
+- **Microsoft.Windows.SDK.NET (C#/WinRT projection, WinRT.Runtime)**: Part of the .NET SDK's Windows targeting pack. The package has no licence file. Its terms are at https://aka.ms/WinSDKLicenseURL.
 - **CommunityToolkit.HighPerformance**: Its notices ship as notices\CommunityToolkit-ThirdPartyNotices.txt.
-- **zlib-ng (zlib-ng2.dll)**: Native codec next to both exes; publish copies a local build or CUE4Parse downloads it from the Zlib-ng.NET release assets.
-- **Oodle Data (oodle-data-shared.dll)**: Proprietary. Not open source and no licence text is published with this binary. CUE4Parse downloads it from github.com/WorkingRobot/OodleUE (builds of the Oodle Data source that ships with Unreal Engine; that repository has no licence file). Oodle is proprietary software of Epic Games Tools (RAD Game Tools), not open source; SCSKiller has no agreement with Epic or RAD. build/publish.ps1 currently puts the DLL in the distribution: whether that redistribution is permitted has not been established. With -NoOodle (the CI and release workflows) it leaves it out, and the app downloads it on first use.
-- **Velopack**: the installer and updater. Its Update.exe and Setup.exe are built from the same MIT source by `vpk pack` (build/release.ps1).
+- **zlib-ng (zlib-ng2.dll)**: Native codec next to both exes, from the Zlib-ng.NET release assets, checked against a pinned SHA-256.
+- **Oodle Data (oodle-data-shared.dll)**: Proprietary software of Epic Games Tools (RAD Game Tools), with no published licence text. SCSKiller has no agreement with Epic or RAD. CUE4Parse downloads it from github.com/WorkingRobot/OodleUE (builds of the Oodle Data source that ships with Unreal Engine, no licence file there), checked against a pinned SHA-256. Releases leave it out (build/publish.ps1 -NoOodle) and the app downloads it on first use. Whether a build that includes it may be redistributed hasn't been established.
+- **Velopack**: the installer and updater. Its Update.exe and Setup.exe come from the same MIT source, built by `vpk pack`.
 - **NSec.Cryptography**: verifies the Ed25519 signature on the update feed. Its NOTICE lists libsodium (ISC) and RFC 6234 sample code (Simplified BSD).
-- **Vulkan-Headers (proxy/third_party/vulkan)**: Source only: used by the proxy self-test, not in the shipped binaries.
-- **AMD GPU Services (amd_ags_x64.dll)**: AMD's signed release DLL, unmodified, in native\ (the proxy's CMake configure downloads it, pinned by SHA-256). scskiller_warm.exe loads it on AMD to create its device under a game's AGS app name.
-- **Game archive formats** (knowledge only: no code, keys or other data copied): the FromSoftware readers follow the layouts SoulsFormats (github.com/soulsmods/SoulsFormatsNEXT) and UXM Selective Unpack (github.com/Nordgaren/UXM-Selective-Unpack) document, and use the shader file names in UXM's archive dictionaries; the RE Engine package reader follows ree-pak-rs (github.com/eigeen/ree-pak-rs) and REE.PAK.Tool. No game key is embedded: the archive keys are read from the user's own install at run time, or given by the user, and kept on that PC only. Where the install doesn't carry them in the clear (Dark Souls III's archive keys, PRAGMATA's table-key modulus), the app downloads them at run time from those projects' public sources (UXM's `UXM/ArchiveKeys.cs`, ree-pak-rs's `ree-pak-core/src/pak/cipher/pak.rs`, each pinned to a commit) to the user's PC, keeps only what opens the user's own archives, and never ships them.
+- **Vulkan-Headers (proxy/third_party/vulkan)**: Source only, for the proxy self-test. Not in the shipped binaries.
+- **AMD GPU Services (amd_ags_x64.dll)**: AMD's signed release DLL, unmodified, in native\, downloaded by the proxy's CMake configure and pinned by SHA-256. scskiller_warm.exe loads it on AMD to create its device under a game's AGS app name.
+- **Game archive formats** (knowledge only, no code, keys or other data copied): the FromSoftware readers follow the layouts SoulsFormats (github.com/soulsmods/SoulsFormatsNEXT) and UXM Selective Unpack (github.com/Nordgaren/UXM-Selective-Unpack) document, and use the shader file names in UXM's archive dictionaries. The RE Engine package reader follows ree-pak-rs (github.com/eigeen/ree-pak-rs) and REE.PAK.Tool. No game key is embedded or shipped. Archive keys come from the user's install or the user, and stay on that PC. Where an install doesn't carry them in the clear (Dark Souls III's archive keys, PRAGMATA's table-key modulus), the app downloads them from those projects' public sources, pinned to a commit (UXM's `UXM/ArchiveKeys.cs`, ree-pak-rs's `ree-pak-core/src/pak/cipher/pak.rs`), and keeps only what opens the user's own archives.
 - **Build-time only, not shipped**: MemoryPack.Generator (source generator, MIT), Microsoft.Windows.SDK.BuildTools and Microsoft.Windows.SDK.BuildTools.MSIX (Microsoft Windows SDK terms), NETStandard.Library / Microsoft.NETCore.Platforms (metapackages).
 - **Native tools** (`d3d12.dll`, `scskiller_warm.exe`): SCSKiller's own code, statically linked with the Microsoft C/C++ runtime (Visual Studio distributable code).
-- **known-stutter.json**: facts about games with the source of each (a link or a dated citation); no third-party text is copied.
+- **known-stutter.json**: facts about games with the source of each (a link or a dated citation). No third-party text is copied.
 
 ## Licence texts
 

@@ -36,7 +36,7 @@
         <!-- the pane opens only once the pages have the room they have at the minimum window width with it compact -->
         <NavigationView x:Name="Nav" Grid.Row="1" OpenPaneLength="248" ExpandedModeThresholdWidth="1258"
                         IsBackButtonVisible="Collapsed" IsPaneToggleButtonVisible="False" IsSettingsVisible="False"
-                        SelectionChanged="OnNavSelection">
+                        SelectionChanged="OnNavSelection" ItemInvoked="OnNavInvoked">
             <NavigationView.MenuItems>
                 <NavigationViewItem x:Name="LibraryItem" Content="Library">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xF0E2;" /></NavigationViewItem.Icon>

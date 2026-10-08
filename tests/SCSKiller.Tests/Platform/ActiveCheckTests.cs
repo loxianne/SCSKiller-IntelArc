@@ -19,7 +19,7 @@ public class ActiveCheckTests : IDisposable
         new RouteFailover(new CommunityTests.Fake(r =>
         {
             Assert.Equal((HttpMethod.Post, "https://api.test.com/v1/active"), (r.Method, r.RequestUri!.ToString()));
-            var headers = r.Headers.Concat(r.Content!.Headers).Select(h => h.Key).Except(["Content-Type", "Content-Length"]).ToList();
+            var headers = r.Headers.Concat(r.Content!.Headers).Select(h => h.Key).Except(["Content-Type", "Content-Length", "User-Agent"]).ToList();
             lock (_bodies) _bodies.Add(headers.Count == 0 ? r.Content.ReadAsStringAsync().Result : string.Join(' ', headers));   // no token, no id
             return CommunityTests.Ours(_status);
         }), [new("https://api.test.com/")], _clock), _clock);

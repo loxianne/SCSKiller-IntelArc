@@ -83,12 +83,14 @@ public static class UnityFiles
     public sealed record Node(long Offset, long Size, uint Flags, string Path);
 
     /// <summary>A UnityFS bundle: its node table and random access to the uncompressed data (blocks decompressed on
-    /// demand and kept while the bundle is open).</summary>
+    /// demand; the 16 last used are kept while the bundle is open).</summary>
     public sealed class Bundle : IDisposable
     {
+        const int CachedBlocks = 16;   // a big bundle has thousands of 128 KB blocks: keeping them all holds its whole uncompressed size
+
         readonly Microsoft.Win32.SafeHandles.SafeFileHandle file;
         readonly (long UOff, int USize, long COff, int CSize, int Comp)[] blocks;
-        readonly Dictionary<int, byte[]> cache = [];
+        readonly List<(int Index, byte[] Data)> cache = [];   // least recently used first
         public string UnityVersion { get; }
         public IReadOnlyList<Node> Nodes { get; }
         public long BlocksDecompressed { get; private set; }
@@ -148,7 +150,13 @@ public static class UnityFiles
         public byte[] Read(long offset, int count)
         {
             var dst = new byte[count];
-            var i = Array.FindLastIndex(blocks, b => b.UOff <= offset);
+            var i = -1;   // the last block that starts at or before offset
+            for (int lo = 0, hi = blocks.Length - 1; lo <= hi;)
+            {
+                var mid = (lo + hi) / 2;
+                if (blocks[mid].UOff <= offset) (i, lo) = (mid, mid + 1);
+                else hi = mid - 1;
+            }
             for (var done = 0; done < count && i >= 0 && i < blocks.Length; i++)
             {
                 var b = Block(i);
@@ -166,12 +174,22 @@ public static class UnityFiles
 
         byte[] Block(int i)
         {
-            if (cache.TryGetValue(i, out var b)) return b;
+            var at = cache.FindIndex(c => c.Index == i);
+            if (at >= 0)
+            {
+                var hit = cache[at];
+                cache.RemoveAt(at);
+                cache.Add(hit);
+                return hit.Data;
+            }
             var (_, us, co, cs, comp) = blocks[i];
             var src = new byte[cs];
             RandomAccess.Read(file, src, co);
             BlocksDecompressed++;
-            return cache[i] = Decompress(src, us, comp);
+            var b = Decompress(src, us, comp);
+            if (cache.Count == CachedBlocks) cache.RemoveAt(0);
+            cache.Add((i, b));
+            return b;
         }
 
         public void Dispose()

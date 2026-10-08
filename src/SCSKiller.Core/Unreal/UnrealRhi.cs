@@ -17,7 +17,7 @@ namespace SCSKiller.Core.Unreal;
 /// A fork whose own WindowsDynamicRHI.cpp starts DX12 unless -dx11/-d3d11 is given (<see cref="Dx12Forks"/>) skips 2 and 3.
 /// Values: "D3D12" / "D3D11" / "Vulkan", suffixed " (launch option)", " (user setting)" or " (last run)" when that decided
 /// it rather than the project default; "D3D11 or D3D12" when it can't be decided: the project defaults to DX11 but ships
-/// DX12-only (SM6) shaders or ray tracing (DX12 is then a launch or in-game choice we can't see), the Steam launch menu offers
+/// DX12-only (SM6) shaders or ray tracing (DX12 is then a launch or in-game choice) and the game's last log doesn't say, the Steam launch menu offers
 /// several and the game's last log doesn't say, or the config is unreadable (encrypted) and the log doesn't say. SM6-only
 /// shader libraries mean D3D12 whatever the config says.</summary>
 public static class UnrealRhi
@@ -110,6 +110,26 @@ public static class UnrealRhi
         return v == "0";
     }
 
+    /// <summary>NVIDIA Aftermath with shader debug info: r.GPUCrashDebugging.Aftermath.DumpShaderDebugInfo or .TrackAll (all
+    /// feature flags) on in the Engine ini hierarchy, and r.GPUCrashDebugging.Aftermath not off (RHICoreNvidiaAftermath.cpp
+    /// defaults it to 1). Aftermath's GenerateShaderDebugInfo with crash dumps puts every pipeline under another NVIDIA cache
+    /// key, so a warm's entries never serve the game. The generic r.GPUCrashDebugging takes no part: false only defers to
+    /// the Aftermath cvar (UE::RHI::ShouldEnableGPUCrashFeature), and games set it false in BaseEngine.ini. The launch options
+    /// override both as that function and InitializeBeforeDeviceCreation read them.
+    /// ponytail: Engine ini only; a device profile or the user's Engine.ini that turns it off isn't read.</summary>
+    public static bool AftermathShaderDebug(IReadOnlyDictionary<string, string> configs, string project, string launch = "")
+    {
+        var engine = Ordered(EngineIni, configs, project).ToList();
+        string? CVar(string key) => Last(engine, "ConsoleVariables", key) ?? Last(engine, "SystemSettings", key);
+        bool On(string key) => CVar(key) is { } v && IsOn(v);
+        bool Param(string name) => Regex.IsMatch(launch, $@"(?:^|\s)-{name}(?![=\w])", RegexOptions.IgnoreCase);
+        var aftermath = !Param("nogpucrashdebugging") && (Param("gpucrashdebugging") || !(CVar("r.GPUCrashDebugging.Aftermath") is { } v && IsOff(v)));
+        if (Regex.Match(launch, @"(?:^|\s)-nvaftermath=(\d+)", RegexOptions.IgnoreCase) is { Success: true } m) aftermath = m.Groups[1].Value.Trim('0').Length > 0;
+        else if (Param("nvaftermath")) aftermath = true;
+        return aftermath && (On("r.GPUCrashDebugging.Aftermath.DumpShaderDebugInfo") || On("r.GPUCrashDebugging.Aftermath.TrackAll")
+            || Param("nvAftermathDumpShaderDebugInfo") || Param("nvaftermathall"));
+    }
+
     static bool IsOn(string v) => v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase);
 
     static bool IsOff(string v) => v == "0" || v.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -117,21 +137,28 @@ public static class UnrealRhi
     static bool Same(string pattern, string path, string project) => string.Equals(pattern.Replace("{P}", project), path, StringComparison.OrdinalIgnoreCase);
 
     static IEnumerable<string> Ordered(string[] order, IReadOnlyDictionary<string, string> configs, string project) =>
-        order.SelectMany(p => configs.Where(c => Same(p, c.Key, project)).Select(c => c.Value));
+        order.SelectMany(p => configs.Where(c => Same(p, c.Key, project)).Select(c => c.Value.TrimStart('\uFEFF')));   // a BOM would hide the first section header
 
     /// <summary>(GraphicsApi, the evidence that decided it). <paramref name="configs"/>: pak path -> text of the files
     /// <see cref="IsConfig"/> selects; <paramref name="userDir"/>: the user's Saved folder or null; <paramref name="launch"/>:
     /// the command line the store adds; <paramref name="menu"/>, <paramref name="menuDefault"/>: <see cref="LaunchMenu"/>.</summary>
     public static (string Api, string Why) Resolve(int engineMajor, IReadOnlyCollection<string> platforms, IReadOnlyDictionary<string, string> configs,
-        string project, string? userDir, string launch, IReadOnlyList<string>? menu = null, string? menuDefault = null, string? fork = null)
+        string project, string? userDir, string launch, IReadOnlyList<string>? menu = null, string? menuDefault = null, string? fork = null) =>
+        Resolve(engineMajor, platforms, configs, project, userDir, launch, out _, menu, menuDefault, fork);
+
+    /// <param name="engineDefault">the engine's default API for <paramref name="engineMajor"/> decided it: neither the game,
+    /// its config nor the user's settings name one (step 3, DefaultGraphicsRHI unset or _Default)</param>
+    public static (string Api, string Why) Resolve(int engineMajor, IReadOnlyCollection<string> platforms, IReadOnlyDictionary<string, string> configs,
+        string project, string? userDir, string launch, out bool engineDefault, IReadOnlyList<string>? menu = null, string? menuDefault = null, string? fork = null)
     {
+        engineDefault = false;
         bool sm5 = platforms.Contains("PCD3D_SM5"), sm6 = platforms.Contains("PCD3D_SM6");
         if (sm6 && !sm5) return ("D3D12", "only SM6 shaders, which run on DX12 only");
         if (Regex.Match(launch, @"(?:^|\s)-(dx11|d3d11|dx12|d3d12|vulkan)\b", RegexOptions.IgnoreCase) is { Success: true } cmd)
             return ($"{Api(cmd.Groups[1].Value)} (launch option)", $"launch option -{cmd.Groups[1].Value}");
         if (menu?.Any(e => MenuApi(e) != null) == true)
         {
-            var bare = Resolve(engineMajor, platforms, configs, project, userDir, launch, fork: fork);   // what an entry without a flag runs
+            var bare = Resolve(engineMajor, platforms, configs, project, userDir, launch, out var bareDefault, fork: fork);   // what an entry without a flag runs
             var plain = bare.Api.Split(" (")[0];
             var offered = menu.Select(e => MenuApi(e) ?? plain).Distinct().ToList();
             if (offered.Count == 1)
@@ -139,7 +166,11 @@ public static class UnrealRhi
             if (LastRun(userDir) is { } run) return ($"{run.Api} (last run)", $"the game's Steam launch menu offers {string.Join(" / ", offered)}; the game's last log: {run.Line}");
             // a player who picks DX11 runs it, so only a DX12 default decides
             if (menuDefault != null && (MenuApi(menuDefault) ?? plain) == "D3D12")
-                return MenuApi(menuDefault) != null ? ("D3D12 (launch option)", "the default entry of the game's Steam launch menu passes D3D12, no log") : bare;
+            {
+                if (MenuApi(menuDefault) != null) return ("D3D12 (launch option)", "the default entry of the game's Steam launch menu passes D3D12, no log");
+                engineDefault = bareDefault;
+                return bare;
+            }
             return (Ambiguous, $"the game's Steam launch menu offers {string.Join(" / ", offered)}, no log");
         }
         if (fork != null && Dx12Forks.Contains(fork)) return ("D3D12", $"{fork} starts DX12 unless -dx11 or -d3d11 is given");
@@ -163,8 +194,9 @@ public static class UnrealRhi
             : Last(settings, "*", "PreferredGraphicsAPI") is { } g ? (Api(g), $"PreferredGraphicsAPI={g}")
             : Last(settings, "D3DRHIPreference", "bUseD3D12InGame") is { } b && b.Equals("true", StringComparison.OrdinalIgnoreCase) ? ("D3D12", "bUseD3D12InGame=True")
             : ((string?)null, "");
-        if (pref.Item1 is { } api && api != "?" && api != byProject && (engineMajor >= 5 || !explicitDefault))
-            return ($"{api} (user setting)", $"{pref.Item2} in the user's GameUserSettings.ini over {why}");
+        var honoured = pref.Item1 is { } api && api != "?" && (engineMajor >= 5 || !explicitDefault) ? pref.Item1 : null;
+        if (honoured != null && honoured != byProject)
+            return ($"{honoured} (user setting)", $"{pref.Item2} in the user's GameUserSettings.ini over {why}");
 
         if (!configs.Keys.Any(k => Same(ProjectEngineIni, k, project))) // the project's own config is unreadable (encrypted paks)
         {
@@ -172,10 +204,16 @@ public static class UnrealRhi
             return sm5 && sm6 ? (Ambiguous, "project config unreadable, both SM5 and SM6 shaders ship, no log")
                 : (Ambiguous, $"project config unreadable, no log (UE{engineMajor} default would be {byProject})");
         }
-        if (byProject == "D3D11" && sm6) return (Ambiguous, $"{why}, but DX12-only (SM6) shaders ship: DX12 is a launch or in-game option");
         // a UE4 DX12 game may ship SM5 libraries only; ray tracing runs on DX12 only, so a project that ships it offers DX12
-        if (byProject == "D3D11" && Last(Ordered(EngineIni, configs, project), "/Script/Engine.RendererSettings", "r.RayTracing") is { } rt && IsOn(rt))
-            return (Ambiguous, $"{why}, but the project ships ray tracing (r.RayTracing={rt}), which runs on DX12 only: DX12 is a launch or in-game option");
+        var offers = byProject != "D3D11" ? null
+            : sm6 ? $"{why}, but DX12-only (SM6) shaders ship: DX12 is a launch or in-game option"
+            : Last(Ordered(EngineIni, configs, project), "/Script/Engine.RendererSettings", "r.RayTracing") is { } rt && IsOn(rt)
+                ? $"{why}, but the project ships ray tracing (r.RayTracing={rt}), which runs on DX12 only: DX12 is a launch or in-game option" : null;
+        // the player's own choice of the default API outranks a log of an earlier run on the other one
+        if (offers != null && honoured != null) return ($"{honoured} (user setting)", $"{pref.Item2} in the user's GameUserSettings.ini; {offers}");
+        if (offers != null)
+            return LastRun(userDir) is { } last ? ($"{last.Api} (last run)", $"{offers}; the game's last log: {last.Line}") : (Ambiguous, offers + ", no log");
+        engineDefault = !explicitDefault && honoured == null;
         return (byProject, why + (pref.Item1 != null ? $"; user {pref.Item2} agrees or is ignored" : ""));
     }
 

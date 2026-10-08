@@ -10,7 +10,7 @@ using SCSKiller.Core.Planning;
 
 namespace SCSKiller.Tests.Platform;
 
-// The community database's read side (docs/db-contract.md) against a fake handler: no network, synthetic recordings only.
+// The community database's read side against a fake handler: no network, synthetic recordings only.
 public class CommunityTests : IDisposable
 {
     static readonly Uri Com = new("https://api.test.com/"), Io = new("https://api.test.io/");
@@ -70,17 +70,18 @@ public class CommunityTests : IDisposable
 
     internal static string Sha1(byte[] b) => PsoDb.Hex(SHA1.HashData(b));
 
-    /// <summary>A root signature as the database carries it: a DXBC container of one RTS0 part (made-up bytes).</summary>
-    internal static byte[] RootSignature()
+    /// <summary>A root signature as the database carries it: a DXBC container of one RTS0 part (made-up bytes), padded to
+    /// <paramref name="size"/>.</summary>
+    internal static byte[] RootSignature(int size = 68)
     {
-        var c = new byte[68];
+        var c = new byte[size];
         "DXBC"u8.CopyTo(c);
         BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(20), 1);
         BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(24), (uint)c.Length);
         BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(28), 1);
         BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(32), 36);
         "RTS0"u8.CopyTo(c.AsSpan(36));
-        BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(40), 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(40), (uint)size - 44);
         // an empty 1.0 root signature: no parameters, no static samplers
         foreach (var (at, v) in new[] { (44, 1u), (52, 24u), (60, 24u) }) BinaryPrimitives.WriteUInt32LittleEndian(c.AsSpan(at), v);
         return c;
@@ -269,11 +270,13 @@ public class CommunityTests : IDisposable
         Assert.Contains("Can't reach", offline.Problem);
     }
 
-    /// <summary>A body that sends nothing after the headers, until cancelled.</summary>
+    /// <summary>A body that sends nothing after the headers, until cancelled. <see cref="Reading"/>: its first read began.</summary>
     internal sealed class Stalled : Stream
     {
+        public readonly TaskCompletionSource Reading = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
         {
+            Reading.TrySetResult();
             await Task.Delay(Timeout.Infinite, ct);
             return 0;
         }
@@ -290,9 +293,9 @@ public class CommunityTests : IDisposable
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    internal static HttpResponseMessage StalledBody()
+    internal static HttpResponseMessage StalledBody(Stalled? body = null)
     {
-        var r = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new Stalled()) };
+        var r = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(body ?? new Stalled()) };
         r.Headers.Add("X-SCSK", "1");
         return r;
     }
@@ -302,12 +305,15 @@ public class CommunityTests : IDisposable
     {
         var obj = Brotli(HashOnly(new string('1', 40)));
         var entry = new CommunityEntry(Content, PsoDb.Hex(SHA256.HashData(obj)), obj.Length, 1, 2);
-        var fake = new Fake(_ => StalledBody());
-        var community = new Community(_dir, (_, _) => Task.FromResult<string?>("t"), new RouteFailover(fake, [Com, Io], _clock), _clock)
-            { BodyIdle = TimeSpan.FromMilliseconds(200) };
+        var (clock, body) = (new WelcomeTests.ManualClock(), new Stalled());
+        var fake = new Fake(_ => StalledBody(body));
+        var community = new Community(_dir, (_, _) => Task.FromResult<string?>("t"), new RouteFailover(fake, [Com, Io], clock), clock);
         var game = Path.Combine(_dir, "games", "steam_480");
 
-        Assert.Null(await community.DownloadAsync(entry, game).WaitAsync(TimeSpan.FromSeconds(10)));   // no CancellationToken: a background pass's
+        var download = community.DownloadAsync(entry, game);   // no CancellationToken: a background pass's
+        await body.Reading.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        clock.Advance(community.BodyIdle);   // the body's idle time, on the community's clock
+        Assert.Null(await download.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Contains("didn't answer in time", community.Problem);
         Assert.Null(await community.DownloadAsync(entry, game));   // backing off: not asked again yet
         Assert.Single(fake.Log);
@@ -433,6 +439,48 @@ public class CommunityTests : IDisposable
         var before = GC.GetAllocatedBytesForCurrentThread();
         Assert.Empty(PsoDb.Read(s).ToList());
         Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 16 << 20);
+    }
+
+    [Fact]
+    public void An_entry_of_up_to_250k_records_is_read()
+    {
+        var rs = RootSignature();
+        var sha = Sha1(rs);
+        using var m = new MemoryStream();
+        PsoDb.WriteBlob(m, sha, rs);   // the root signature counts too
+        for (var i = 1; i < Core.Planning.HashOnly.MaxEntryRecords; i++) PsoDb.Write(m, 'C', PsoDb.Compute(sha, i.ToString("x40")));
+        Assert.Equal(250_000, Core.Planning.HashOnly.MaxEntryRecords);
+        Assert.Equal(249_999, Community.Check(m.ToArray()));
+        PsoDb.Write(m, 'C', PsoDb.Compute(sha, new string('f', 40)));
+        Assert.Null(Community.Check(m.ToArray()));
+    }
+
+    [Fact]
+    public async Task A_download_over_the_decompressed_cap_is_ignored()
+    {
+        Assert.Equal(320 << 20, Community.MaxRaw);   // a valid download between 256 and 320 MiB would hold about 1 GB in the test
+        var rs = RootSignature(Core.Planning.HashOnly.MaxRootSignature);
+        var sha = Sha1(rs);
+        void Write(Stream s, long copies)
+        {
+            for (var i = 0L; i < copies; i++) PsoDb.WriteBlob(s, sha, rs);   // the same root signature again: allowed, kept once
+            PsoDb.Write(s, 'C', PsoDb.Compute(sha, new string('1', 40)));
+        }
+        using (var few = new MemoryStream())
+        {
+            Write(few, 3);
+            Assert.Equal(1, Community.Check(few.ToArray()));
+        }
+        using var packed = new MemoryStream();
+        using (var b = new BrotliStream(packed, CompressionLevel.Fastest, leaveOpen: true)) Write(b, Community.MaxRaw / (25L + rs.Length) + 1);
+        var obj = packed.ToArray();
+        var entry = new CommunityEntry(Content, PsoDb.Hex(SHA256.HashData(obj)), obj.Length, 1, 2);
+        var game = Path.Combine(_dir, "games", "steam_480");
+        var community = Make(new Fake(_ => Ours(HttpStatusCode.OK, obj)));
+
+        Assert.Null(await community.DownloadAsync(entry, game));
+        Assert.Contains("can't read was ignored", community.Problem);
+        Assert.False(File.Exists(Path.Combine(game, "community.db")));
     }
 
     [Fact]

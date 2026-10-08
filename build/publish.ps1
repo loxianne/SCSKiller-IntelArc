@@ -30,6 +30,10 @@ if (-not $Version) {
 }
 $Version = $Version -replace '^v', ''
 if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$') { throw "not a SemVer X.Y.Z[-pre]: $Version" }
+# a versioned build verifies the server's signed lists: the rules key must be pinned (tools/release-sign keygen --for rules)
+if ($Version -and (Get-Content (Join-Path $repo "src\SCSKiller.Core\App\ContentTrust.cs") -Raw) -notmatch '\["rules-a"\]\s*=\s*"[A-Za-z0-9+/]{43}="') {
+    throw "ContentTrust.RulesKeys has no rules-a key: pin the public key from tools/release-sign keygen --for rules before a release"
+}
 $versionArgs = if ($Version) { @("-p:Version=$Version", "-p:IncludeSourceRevisionInInformationalVersion=false") } else { @() }
 Write-Host "version: $(if ($Version) { $Version } else { '0.0.0-internal.0 (dev)' })"
 $dotnet = Join-Path $env:LOCALAPPDATA "Microsoft\dotnet\dotnet.exe"   # .NET 10 SDK is per user; PATH may have an older one
@@ -57,6 +61,8 @@ New-Item -ItemType Directory -Force (Join-Path $native "segheap") | Out-Null
 Copy-Item (Join-Path $build "Release\segheap\scskiller_warm.exe") (Join-Path $native "segheap")
 
 # 2. app + CLI
+# the SDK reuses obj\...\apphost.exe until the assembly changes, so a CETCompat change alone would ship the old flag
+Get-ChildItem (Join-Path $repo "src") -Recurse -Filter apphost.exe | Where-Object FullName -like "*\obj\*" | Remove-Item
 Run $dotnet (@("publish", (Join-Path $repo "src\SCSKiller.App\SCSKiller.App.csproj"), "-c", $Configuration, "-r", "win-x64",
     "--self-contained", "true", "-p:Platform=x64", "-p:EnableMsixTooling=true", "-o", $out) + $versionArgs)   # MSIX tooling: else the app's .pri/.xbf aren't published and XAML crashes at start
 Run $dotnet (@("publish", (Join-Path $repo "src\SCSKiller.Cli\SCSKiller.Cli.csproj"), "-c", $Configuration, "-r", "win-x64",
@@ -70,20 +76,36 @@ if ($bytes[$subsystem] -ne 3) { throw "scskiller.exe: unexpected PE subsystem $(
 $bytes[$subsystem] = 2
 [IO.File]::WriteAllBytes((Join-Path $cli "scskillerw.exe"), $bytes)
 
-# 4. codecs next to both executables (UnrealReader loads them from AppContext.BaseDirectory): local copies first
-#    (this checkout, then the main checkout when run from a git worktree), else CUE4Parse downloads them.
-$codecs = @(if (-not $NoOodle) { "oodle-data-shared.dll" }) + "zlib-ng2.dll"
-$roots = @($repo)
-try { $common = git -C $repo rev-parse --path-format=absolute --git-common-dir } catch { $common = $null }
-if ($common) { $roots += Split-Path $common -Parent }
-$dirs = $roots | Select-Object -Unique | ForEach-Object { Join-Path $_ "tools\ueshaders"; Join-Path $_ "tools\ueshaders\bin\Release\net10.0" }
-foreach ($c in $codecs) {
-    $found = $dirs | ForEach-Object { Join-Path $_ $c } | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($found) { Copy-Item $found $cli; Write-Host "$c <- $found" }
+# 3b. no .NET exe may be CET-compatible (Directory.Build.props): the flag is bit 0 of the data of the debug directory entry of
+#     type 20 (IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS). PE32+: the debug directory is data directory 6, at optional header + 160.
+foreach ($exe in "SCSKiller.exe", "cli\scskiller.exe", "cli\scskillerw.exe") {
+    $b = [IO.File]::ReadAllBytes((Join-Path $out $exe))
+    $pe = [BitConverter]::ToInt32($b, 0x3C)
+    $opt = $pe + 24
+    $sections = $opt + [BitConverter]::ToUInt16($b, $pe + 20)
+    $rva = [BitConverter]::ToUInt32($b, $opt + 160)
+    $size = [BitConverter]::ToUInt32($b, $opt + 164)
+    $dir = $null
+    for ($i = 0; $i -lt [BitConverter]::ToUInt16($b, $pe + 6); $i++) {
+        $s = $sections + 40 * $i
+        $va = [BitConverter]::ToUInt32($b, $s + 12)
+        if ($rva -ge $va -and $rva -lt $va + [BitConverter]::ToUInt32($b, $s + 16)) { $dir = $rva - $va + [BitConverter]::ToUInt32($b, $s + 20) }
+    }
+    if ($null -eq $dir) { throw "${exe}: no debug directory" }
+    for ($e = $dir; $e -lt $dir + $size; $e += 28) {
+        if ([BitConverter]::ToUInt32($b, $e + 12) -eq 20 -and ([BitConverter]::ToUInt32($b, [BitConverter]::ToUInt32($b, $e + 24)) -band 1)) {
+            throw "$exe is CET-compatible: .NET would fail-fast at start on Windows 10 builds without CET special APCs"
+        }
+    }
 }
-if ($codecs | Where-Object { -not (Test-Path (Join-Path $cli $_)) }) { Run (Join-Path $cli "scskiller.exe") @("fetch-codecs") }
-if ($NoOodle) { Remove-Item (Join-Path $cli "oodle-data-shared.dll") -ErrorAction SilentlyContinue }   # fetch-codecs fetches both
-foreach ($c in $codecs) { Copy-Item (Join-Path $cli $c) $out }
+
+# 4. codecs next to both executables (UnrealReader loads them from AppContext.BaseDirectory), from a build-owned cache,
+#    never the app's data folder: fetch-codecs keeps the pinned copies there (Codecs.Pinned), downloads one that is
+#    missing or doesn't match, and fails the build when no copy matches
+$codecs = @(if (-not $NoOodle) { "oodle-data-shared.dll" }) + "zlib-ng2.dll"
+$cache = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "SCSKiller-build\codecs"
+Run (Join-Path $cli "scskiller.exe") @("fetch-codecs", $cache)
+foreach ($c in $codecs) { Copy-Item (Join-Path $cache $c) $cli; Copy-Item (Join-Path $cache $c) $out }
 
 # 4b. licences: our notices and licence (GPL-3.0-or-later + the section 7 permission), plus the large notice files of the Microsoft packages as shipped
 Copy-Item (Join-Path $repo "THIRD-PARTY-NOTICES.md") $out

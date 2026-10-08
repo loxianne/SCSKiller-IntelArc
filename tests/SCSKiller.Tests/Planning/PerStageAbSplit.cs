@@ -5,7 +5,7 @@ using static SCSKiller.Core.Planning.PsoDb;
 
 namespace SCSKiller.Tests.Planning;
 
-/// <summary>The GPU A/B's input (gen/ab_perstage.py): FF7's recorded PSOs split, in file order, into a per-stage cover
+/// <summary>The GPU A/B's input: FF7's recorded PSOs split, in file order, into a per-stage cover
 /// (each PSO that brings a unit not seen yet, under <see cref="UnitPolicy.Nvidia"/> or <see cref="UnitPolicy.Amd"/>) and
 /// the rest (every unit already covered). With a per-stage cache, warming the cover alone makes the rest cache hits.
 /// Writes &lt;dir&gt;\cover.keys and rest.keys (record keys) when SCSKILLER_AB_OUT=&lt;dir&gt; [SCSKILLER_AB_POLICY=amd].</summary>

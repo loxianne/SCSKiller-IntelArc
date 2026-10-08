@@ -11,7 +11,7 @@ using static SCSKiller.Tests.Planning.MiddlewarePackTests;
 
 namespace SCSKiller.Tests.Planning;
 
-/// <summary>Shared middleware packs (docs/db-contract.md "Middleware packs"): the manifest's 'P' records, the free download
+/// <summary>Shared middleware packs: the manifest's 'P' records, the free download
 /// matched to this install's DLL copy, and seeding by GPU vendor (fake DLLs, a fake handler, no network).</summary>
 public class SharedPackTests(ITestOutputHelper output)
 {
@@ -190,11 +190,14 @@ public class SharedPackTests(ITestOutputHelper output)
         var x = Make("sp-stall");
         var dll = Middleware.Detect(Install(x, "game", x.Dll)).Single();
         var image = Middleware.Scan(dll.Path);
-        var fake = new CommunityTests.Fake(_ => CommunityTests.StalledBody());
-        var community = new Community(x.Root, (_, _) => Task.FromResult<string?>(null), new RouteFailover(fake, [new("https://api.test.com/")]))
-            { BodyIdle = TimeSpan.FromMilliseconds(200) };
+        var (clock, body) = (new WelcomeTests.ManualClock(), new CommunityTests.Stalled());
+        var fake = new CommunityTests.Fake(_ => CommunityTests.StalledBody(body));
+        var community = new Community(x.Root, (_, _) => Task.FromResult<string?>(null), new RouteFailover(fake, [new("https://api.test.com/")], clock), clock);
         var entry = new CommunityEntry(HashOnly.PackHash(Key(x, x.Dll)), new string('e', 64), 1000, 1, 1);
-        Assert.Null(await community.DownloadPackAsync(entry, dll, image, new MiddlewarePacks(x.Shared), amd: false).WaitAsync(TimeSpan.FromSeconds(10)));
+        var download = community.DownloadPackAsync(entry, dll, image, new MiddlewarePacks(x.Shared), amd: false);
+        await body.Reading.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        clock.Advance(community.BodyIdle);   // the body's idle time, on the community's clock
+        Assert.Null(await download.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Contains("didn't answer in time", community.Problem);
         Assert.Null(await community.DownloadPackAsync(entry, dll, image, new MiddlewarePacks(x.Shared), amd: false));   // backing off
         Assert.Single(fake.Log);
@@ -314,6 +317,22 @@ public class SharedPackTests(ITestOutputHelper output)
         finally { KeyFiles.MaxKeys = bound; }
     }
 
+    /// <summary>A library's key files (66 games, 1.99M keys, 251 MB as strings) stay cached at about 30 MB.</summary>
+    [Fact]
+    public void The_key_cache_holds_a_quarter_million_keys_at_most()
+    {
+        var x = Make("sp-keycap");
+        Assert.Equal(250_000, KeyFiles.MaxKeys);
+        var set = Enumerable.Range(0, 60_000).Select(i => i.ToString("x40")).ToHashSet();
+        for (var i = 0; i < 10; i++)
+        {
+            var path = Path.Combine(x.Root, $"keys{i}");
+            File.WriteAllText(path, $"keys{i}");
+            KeyFiles.Keys(path, _ => set);
+            Assert.InRange(KeyFiles.CachedKeys, 0, 250_000);
+        }
+    }
+
     [Fact]
     public void The_key_cache_drops_every_set_once_none_was_asked_for_in_its_idle_time()
     {
@@ -331,6 +350,16 @@ public class SharedPackTests(ITestOutputHelper output)
         Assert.False(KeyFiles.DropIdle(TimeSpan.Zero));   // nothing left
         KeyFiles.Keys(path, Read);
         Assert.Equal(2, reads);
+    }
+
+    [Fact]
+    public void The_app_drops_the_key_sets_a_minute_after_the_last_was_asked_for()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(1), ScsKiller.KeyCacheIdle);
+        const long asked = 5_000_000;   // TickCount64 at the last lookup
+        Assert.False(KeyFiles.Idle(asked, asked + 59_999, ScsKiller.KeyCacheIdle));
+        Assert.True(KeyFiles.Idle(asked, asked + 60_000, ScsKiller.KeyCacheIdle));
+        Assert.True(KeyFiles.Idle(asked, asked + 5 * 60_000, ScsKiller.KeyCacheIdle));
     }
 
     [Fact]

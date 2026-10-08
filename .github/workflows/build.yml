@@ -1,4 +1,4 @@
-# Build, test and package on a clean Windows runner (docs/release-process.md §3, §8, §10).
+# Build, test and package on a clean Windows runner.
 # One file serves both repos. Private repo: never on a push to a branch; on PRs, workflow_dispatch, the nightly schedule
 # (skipped when main didn't change) and release tags (release.yml), every job on the runner the repository variable
 # SCSK_RUNNER names (the team's self-hosted Windows runner). Public repo (free, GitHub-hosted): also every push to main.
@@ -7,10 +7,10 @@ name: build
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**']
+    paths-ignore: ['**.md']
   pull_request:
     branches: [main, 'release/**']
-    paths-ignore: ['**.md', 'docs/**']
+    paths-ignore: ['**.md']
   schedule:
     - cron: '17 3 * * *'   # nightly, 03:17 UTC
   workflow_dispatch:
@@ -40,23 +40,6 @@ jobs:
         run: |
           at=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.commit.committer.date | fromdate')
           if (( $(date +%s) - at > 90000 )); then echo "unchanged=yes" >> "$GITHUB_OUTPUT"; fi
-
-  # tools/measure.py's self-test (Linux on the public repo, the self-hosted runner on the private one). The public repo
-  # has no tools/measure.py (build/public-allowlist.txt): the step skips itself there (hashFiles needs the checkout, so
-  # the condition is per step, not on the job).
-  tools:
-    needs: changed
-    if: >-
-      !cancelled() && needs.changed.outputs.unchanged != 'yes' &&
-      (!github.event.repository.private || github.event_name != 'push' || github.ref_type == 'tag')
-    runs-on: ${{ vars.SCSK_RUNNER && fromJSON(vars.SCSK_RUNNER) || 'ubuntu-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
-      - name: Test tools/measure.py
-        if: hashFiles('tools/test_measure.py') != ''
-        shell: bash
-        run: $(command -v python3 || command -v python) tools/test_measure.py
 
   build:
     needs: changed
@@ -114,7 +97,7 @@ jobs:
         run: dotnet test tests/SCSKiller.Tests -c Release --no-build --filter "FullyQualifiedName~CodecCpuTests"
 
       # No Oodle DLL in anything that leaves the build (THIRD-PARTY-NOTICES.md); the app downloads it on first use.
-      # Nothing is signed here: build/release.ps1 signs these exact bytes after checking them against the sums.
+      # Nothing is signed here: the release step signs these exact bytes after checking them against the sums.
       # A tag build is stamped with the tag's version (publish.ps1 drops the v; a bad tag fails it). Otherwise the dev default.
       - name: Publish
         shell: powershell
@@ -128,7 +111,7 @@ jobs:
           }
           [IO.File]::WriteAllText("$dist\SHA256SUMS-unsigned.txt", ($sums -join "`n") + "`n")   # sha256sum -c format (LF), paths relative to dist/
 
-      # Archived (not archive: false): `gh run download`, which release.ps1 uses, can't read unarchived artifacts.
+      # Archived (not archive: false): `gh run download`, which the release step uses, can't read unarchived artifacts.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
         if: ${{ !github.event.repository.private || github.ref_type == 'tag' }}   # private: storage is billed, only release tags need it
         with:

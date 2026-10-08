@@ -7,14 +7,16 @@ using static SCSKiller.Core.Planning.PsoDb;
 
 namespace SCSKiller.Core.Planning;
 
-/// <summary>Hash-only recordings, the form the community database stores, serves and accepts (docs/plan-db.md §0, §3;
-/// docs/db-contract.md "Objects"): every record the recorder writes, 'G' / 'C' / 'S' PSOs, 'R' / 'A' ray tracing state
+/// <summary>Hash-only recordings, the form the community database stores, serves and accepts:
+/// every record the recorder writes, 'G' / 'C' / 'S' PSOs, 'R' / 'A' ray tracing state
 /// objects and the 'N' NVAPI state of either, plus the root signatures they name as 'B' records, never shader bytes (a state object's DXIL libraries are
 /// hashes, rehydrated from the install like shaders), and the uploader's 'L' flags (<see cref="LocalOnly"/>). Shared by the
-/// client's export and the server's import and upload validation (scsk-origin links this file).</summary>
+/// client's export and the server's import and upload validation (the server links this file).</summary>
 public static class HashOnly
 {
-    public const int MaxRecords = 200_000, MaxRootSignature = 64 << 10;
+    /// <summary>Records an input may hold (an upload, an import; same value in records.rs). <see cref="MaxEntryRecords"/>: what
+    /// a client reads from a download.</summary>
+    public const int MaxRecords = 200_000, MaxEntryRecords = 250_000, MaxRootSignature = 64 << 10;
 
     /// <summary>Root signatures, DXIL libraries and collections the distinct state objects (by key) of one input name: an
     /// upload, an import, a chunk of the app's. Each is a string held while it is checked. Real entries: 19,639 at most (3
@@ -57,7 +59,8 @@ public static class HashOnly
     /// references (<see cref="MaxEntryStateObjectRefs"/> for an entry).</summary>
     /// <paramref name="layerMade"/>: more records a layer made, known from other recordings (<see cref="MiddlewarePacks.LayerMade"/>):
     /// dropped too in a local recording that has them without their 'W'.
-    public static List<Rec> Canonical(IEnumerable<Rec> records, bool local, out Dropped dropped, int maxRefs = MaxStateObjectRefs, IReadOnlySet<string>? layerMade = null)
+    public static List<Rec> Canonical(IEnumerable<Rec> records, bool local, out Dropped dropped, int maxRefs = MaxStateObjectRefs, IReadOnlySet<string>? layerMade = null,
+        int maxRecords = MaxRecords)
     {
         var blobs = new SortedDictionary<string, Rec>(StringComparer.Ordinal);
         var psos = new SortedDictionary<string, Rec>(StringComparer.Ordinal);
@@ -109,7 +112,7 @@ public static class HashOnly
                     break;
             }
             // dropped shader blobs and 'W' records don't count (29k shaders of a real 86k-record session)
-            if (++n - shaders - layerRecords > MaxRecords) throw new InvalidDataException($"more than {MaxRecords} records");
+            if (++n - shaders - layerRecords > maxRecords) throw new InvalidDataException($"more than {maxRecords} records");
         }
         if (local && layerMade != null) layer.UnionWith(layerMade);
         foreach (var k in layer)
@@ -164,7 +167,7 @@ public static class HashOnly
         return [.. keep, .. psos.Values, .. ordered, .. nv.Values.Where(r => kept.Contains(Target(r))), .. flags.Values.Where(r => kept.Contains(Target(r)))];
     }
 
-    /// <summary>A shared middleware pack's key (docs/db-contract.md "Middleware packs"): "&lt;GPU vendor&gt;:&lt;DLL vendor&gt;:&lt;DLL
+    /// <summary>A shared middleware pack's key: "&lt;GPU vendor&gt;:&lt;DLL vendor&gt;:&lt;DLL
     /// name, lower case&gt;:&lt;DLL SHA-1&gt;". Its entry's content hash is <see cref="PackHash"/>.</summary>
     public static string PackKey(string gpu, string vendor, string dll, string sha1) => $"{gpu}:{vendor}:{dll.ToLowerInvariant()}:{sha1}";
 
@@ -210,7 +213,7 @@ public static class HashOnly
         return new Counts(all, gfx, vs.Count);
     }
 
-    /// <summary>Splits a canonical recording into canonical recordings (uploads, db-contract.md "Anonymous uploads") of at most
+    /// <summary>Splits a canonical recording into canonical recordings (uploads) of at most
     /// <paramref name="maxRecords"/> PSO and state object records, about <paramref name="maxRaw"/> bytes and at most
     /// <see cref="MaxStateObjectRefs"/> state object references each, every one
     /// valid on its own: a state object travels with every record it builds on (a shared base then goes in several), a record
@@ -377,9 +380,9 @@ public static class HashOnly
     }
 
     /// <summary>Someone else's recording for <see cref="Canonical"/> with local: false, which refuses it by its
-    /// <see cref="MaxRecords"/> + 1st record (a shader blob is an error there, so every record counts): only that many are
+    /// <see cref="MaxEntryRecords"/> + 1st record (a shader blob is an error there, so every record counts): only that many are
     /// made, however many the bytes frame.</summary>
-    public const int RemoteLimit = MaxRecords + 1;
+    public const int RemoteLimit = MaxEntryRecords + 1;
 
     /// <summary>The records of an uncompressed db, read to its last byte; a torn tail is an error (unlike <see cref="PsoDb.Read(Stream)"/>,
     /// which stops there like the proxy). The framing is checked to the end before anything is allocated from a length

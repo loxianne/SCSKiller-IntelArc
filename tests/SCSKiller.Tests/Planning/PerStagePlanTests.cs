@@ -127,6 +127,27 @@ public class PerStagePlanTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>The plan's recorded pipelines are the ones the warm replays on this GPU: a record naming a shader neither the
+    /// recording nor the install has is skipped, and AMD's AGS permutation is never created on NVIDIA.</summary>
+    [Fact]
+    public void RecordedCountsOnlyWhatReplaysHere()
+    {
+        var ags = Shader("csAgs2", Stage.Compute, []) with { Bindings = [new Binding("uav", 0x7FFF0ADE, 0, 1)] };
+        var all = new[] { Vs1, Ps1, Ps3, Cs1, ags };
+        var index = new ShaderIndex("synthetic", ["PCD3D_SM6"], all.ToDictionary(s => s.Sha1), [new ShaderMap("m", "Game", "PCD3D_SM6", all.Select(s => s.Sha1).ToList())]);
+        var dir = Ff7.TempDir("perstage-recorded");
+        var db = Recording(dir);
+        var (rs, blob) = Rs(Cs1);
+        using (var f = new FileStream(db, FileMode.Append))
+        {
+            WriteBlob(f, rs, blob);
+            Write(f, 'C', Compute(rs, ags.Sha1));
+            Write(f, 'C', Compute(rs, new string('9', 40)));   // built at run time on another PC
+        }
+        foreach (var (caps, n) in new[] { (Ff7.Nvidia, 2L), (Ff7.Amd, 3L) })
+            Assert.Equal(n, new Planner().Build(Ff7.Game, Ue426, index, new Recording(db), caps, Path.Combine(dir, caps.Profile), null, CancellationToken.None).Stats.Recorded);
+    }
+
     /// <summary>[WaveSize] compute on the readers' "&lt;platform&gt; wave&lt;N&gt;" platforms: NVIDIA (32 lanes only) plans none of
     /// it, AMD (32 and 64 lanes) the platforms whose range takes 64.</summary>
     /// <summary>No root-signature rule (RE Engine): a stage set resolves only by its counts as a recorded PSO has them, and a

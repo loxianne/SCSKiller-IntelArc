@@ -73,20 +73,21 @@ public sealed class Warmer(IGpuVendorBackend vendor, string? warmExe = null) : I
         if (Games.XboxSource.AppUserModelId(game) == null && (stagePath = StagePath(game, workDir, out var why)) == null)
             Log?.Report($"{game.Name}: the compile runs without the install's folder layout: {why}");
         var reg = vendor.Vendor == GpuVendor.Amd ? Ags?.Invoke(game) : null;
-        var ags = AgsArgs(vendor.Vendor, game, reg, reg == null ? null : AmdAgs.DllFor(game, NativeTools.Find(AmdAgs.DllName)), out var agsWhy);
+        var ags = AgsArgs(vendor.Vendor, reg, reg == null ? null : AmdAgs.DllFor(game, NativeTools.Find(AmdAgs.DllName)), out var agsWhy);
         if (agsWhy != null) Log?.Report($"{game.Name}: {agsWhy}");
         if (Layer?.Invoke(game, workDir) is { } layer) ags = [.. ags, "--layer", layer];
         if (AgilityDir(game.ExePath) is { } d3d12) ags = [.. ags, "--d3d12", d3d12];
         return new WarmRun(vendor, gpu, exe, game, workDir, options, progress, StuckAfter, stagePath, MaxRecoveries, Environment, ags, Log);
     }
 
-    /// <summary>scskiller_warm's --ags arguments: on AMD, for a game that registers with AGS and isn't an Xbox package, the
-    /// child creates its device through <paramref name="agsDll"/> under the game's app and engine names, so the driver keys
-    /// its cache like the game's. Empty otherwise, with the reason when a registration can't be passed.</summary>
-    public static string[] AgsArgs(GpuVendor vendor, Game game, AgsRegistration? reg, string? agsDll, out string? why)
+    /// <summary>scskiller_warm's --ags arguments: on AMD, for a game that registers with AGS (an Xbox app game holds its
+    /// app name's key too, measured), the child creates its device through <paramref name="agsDll"/> under the
+    /// game's app and engine names, so the driver keys its cache like the game's. Empty otherwise, with the reason when a
+    /// registration can't be passed.</summary>
+    public static string[] AgsArgs(GpuVendor vendor, AgsRegistration? reg, string? agsDll, out string? why)
     {
         why = null;
-        if (vendor != GpuVendor.Amd || reg == null || Games.XboxSource.AppUserModelId(game) != null) return [];
+        if (vendor != GpuVendor.Amd || reg == null) return [];
         if (agsDll == null)
         {
             why = $"{AmdAgs.DllName} not found next to the app: the compile fills the exe name's cache, not the one of the game's AGS app name {reg.App}";

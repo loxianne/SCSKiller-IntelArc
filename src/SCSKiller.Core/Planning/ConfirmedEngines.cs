@@ -3,7 +3,7 @@ using SCSKiller.Core.App;
 namespace SCSKiller.Core.Planning;
 
 /// <summary>The Unreal versions and engine forks whose RootSig rule a real game has confirmed: confirmed-engines.json,
-/// embedded in Core and served at /v1/content/confirmed-engines.json (server-rs\content\confirmed-engines.json) so a
+/// embedded in Core and served at /v1/content/confirmed-engines.json so a
 /// confirmation can be added without a release. An entry is a version and its fork ("GAME_..." as EngineInfo.Fork has
 /// it; none = stock). The list in use is the embedded one plus the server's: the server's copy only adds
 /// (<see cref="Contains"/>), and is used when it passes <see cref="TryParse"/> (<see cref="ContentFile"/>).</summary>

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using Microsoft.Windows.AppLifecycle;
+using Velopack;
 
 namespace SCSKiller.App;
 
@@ -15,17 +16,39 @@ public static class Program
     [STAThread]
     static int Main(string[] args)
     {
-        Updater.RunHooks();   // first: Update.exe runs install/update/uninstall hooks through here, and they exit
+        // logged, not handled: the app still ends as it would have
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => LogCrash(e.ExceptionObject as Exception ?? new Exception($"{e.ExceptionObject}"));
+        TaskScheduler.UnobservedTaskException += (_, e) => LogCrash(e.Exception);
+        // Update.exe runs the install, update and uninstall hooks through here, and they exit: before anything but the crash
+        // handlers, and in Main itself, where vpk checks for it
+        UpdateHooks.Hooks(VelopackApp.Build()).Run();
         // an offline session's cleanup helper: no window, no instance of its own
         if (args is [Core.App.ScsKiller.CleanupArg, var game]) return Core.App.ScsKiller.RunOfflineCleanup(new Core.App.AppStore(Core.App.AppStore.DefaultDir), game, exe: Environment.ProcessPath);
-        WinRT.ComWrappersSupport.InitializeComWrappers();
-        if (!IsDesignRun(args) && RedirectedToRunning()) return 0;
-        Microsoft.UI.Xaml.Application.Start(p =>
+        try
         {
-            SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
-            new App();
-        });
+            WinRT.ComWrappersSupport.InitializeComWrappers();
+            if (!IsDesignRun(args) && RedirectedToRunning()) return 0;
+            Microsoft.UI.Xaml.Application.Start(p =>
+            {
+                SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
+                new App();
+            });
+        }
+        catch (Exception e)
+        {
+            StartFailed(e, args);
+            throw;
+        }
         return 0;
+    }
+
+    public static void LogCrash(Exception e) => Core.App.CrashLog.Write(Core.App.AppStore.DefaultDir, e);
+
+    /// <summary>Logs a start that failed and, unless it is a design-data run, which nobody watches, says where the log is.</summary>
+    public static void StartFailed(Exception e, string[] args)
+    {
+        LogCrash(e);
+        if (!IsDesignRun(args)) MessageBoxW(0, $"SCSKiller couldn't start. Details are in {Path.Combine(Core.App.AppStore.DefaultDir, Core.App.CrashLog.FileName)}", "SCSKiller", 0x10 /* MB_ICONERROR */);
     }
 
     public static bool IsDesignRun(string[] args) => args.Any(a => a is "--fake" or "--screenshots");
@@ -48,4 +71,5 @@ public static class Program
     }
 
     [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int MessageBoxW(nint hwnd, string text, string caption, uint type);
 }

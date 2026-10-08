@@ -17,14 +17,15 @@ public static class GameFiles
     /// the exe BattlEye's launcher starts (<see cref="BattlEyeTarget"/>), else <paramref name="launcherExe"/>, else the
     /// largest exe near the install root. A launcher among the last two is replaced by the game it starts
     /// (<see cref="LaunchedExe"/>). Exes in a patcher's or installer's copy of the game (<see cref="Staging"/>) are never
-    /// picked.</summary>
+    /// picked, nor are those an Xbox app game's config marks as not the game (<see cref="XboxSource.NotTheGame"/>).</summary>
     public static string? FindExe(string installDir, string? launcherExe = null)
     {
         if (!Directory.Exists(installDir)) return null;
         if (ShippingExe(installDir, launcherExe) is { } shipping) return shipping;
+        var excluded = XboxSource.NotTheGame(installDir);
         var unreal = UnrealFolders(installDir)
             .SelectMany(d => Directory.EnumerateFiles(d, "*.exe", Flat))
-            .Where(f => !IsEngineFolder(installDir, f) && !InStaging(installDir, f) && !IsHelper(f))
+            .Where(f => !IsEngineFolder(installDir, f) && !InStaging(installDir, f) && !IsHelper(f) && !excluded.Contains(Path.GetFullPath(f)))
             .Select(f => new FileInfo(f))
             .GroupBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
             .Select(same => same.MinBy(f => Path.GetRelativePath(installDir, f.FullName).Count(c => c == Path.DirectorySeparatorChar))!)
@@ -39,14 +40,29 @@ public static class GameFiles
         }
         // ponytail: non-Unreal games get a guess; Steam's real launch target lives in the binary appinfo.vdf, parse it if this misfires
         var exes = Directory.EnumerateFiles(installDir, "*.exe", Deep)
-            .Where(f => !NotTheGame.Any(s => Path.GetRelativePath(installDir, f).Contains(s, StringComparison.OrdinalIgnoreCase)) && !InStaging(installDir, f) && !IsHelper(f))
+            .Where(f => !NotTheGameExe(installDir, f, excluded))
             .Select(f => new FileInfo(f))
             .ToList();
         if (exes.FirstOrDefault(f => Directory.Exists(Path.ChangeExtension(f.FullName, null) + "_Data")) is { } unity) return unity.FullName;   // Unity: Game.exe + Game_Data
         var guess = exes.OrderBy(f => f.DirectoryName!.Length > installDir.TrimEnd('\\').Length ? 1 : 0)   // root folder first
             .ThenByDescending(f => f.Length).FirstOrDefault();
-        return guess == null ? null : LaunchedExe(installDir, guess, exes);
+        return guess == null ? null : NotPlus(LaunchedExe(installDir, guess, exes), exes);
     }
+
+    /// <summary>&lt;Name&gt;.exe for &lt;Name&gt;_Plus.exe beside it, whatever their sizes: the Ubisoft+ build, which only
+    /// subscribers run (the watcher follows it when it runs).</summary>
+    static string NotPlus(string exe, IReadOnlyList<FileInfo> exes)
+    {
+        var name = Path.GetFileNameWithoutExtension(exe);
+        if (!name.EndsWith("_Plus", StringComparison.OrdinalIgnoreCase)) return exe;
+        var plain = Path.Combine(Path.GetDirectoryName(exe)!, name[..^"_Plus".Length] + ".exe");
+        return exes.FirstOrDefault(f => f.FullName.Equals(plain, StringComparison.OrdinalIgnoreCase))?.FullName ?? exe;
+    }
+
+    /// <summary>An exe <see cref="FindExe"/> never picks by its path or name: a helper, a redistributable's, patcher's or installer's copy, or one an Xbox app game's config marks as not the game.</summary>
+    internal static bool NotTheGameExe(string installDir, string exe, ISet<string>? excluded = null) =>
+        NotTheGame.Any(s => Path.GetRelativePath(installDir, exe).Contains(s, StringComparison.OrdinalIgnoreCase)) || InStaging(installDir, exe) || IsHelper(exe)
+        || (excluded ?? XboxSource.NotTheGame(installDir)).Contains(Path.GetFullPath(exe));
 
     /// <summary>The first of <paramref name="bySize"/> (a Shipping exe, then the largest), unless it is 32-bit (a launcher
     /// larger than a modular build's exe): then the largest of the others that isn't, read only in an install without
@@ -67,7 +83,7 @@ public static class GameFiles
     /// <summary>An Unreal game's own process: &lt;Name&gt;-&lt;Platform&gt;-Shipping.exe in a &lt;Project&gt;\Binaries\&lt;Platform&gt;
     /// folder (Win64, WinGDK, WinGRTS...) of the install root or a project one or two levels under it, with an Engine folder
     /// beside the project or in the root (an Unreal install); Engine's, a patcher's copy, helpers and tools (<see cref="NotTheGameBuild"/>)
-    /// aside; of exes named alike, the one nearest the root. One such exe is the game's; of several, the one whose name or
+    /// aside, and those an Xbox app game's config marks as not the game (<see cref="XboxSource.NotTheGame"/>); of exes named alike, the one nearest the root. One such exe is the game's; of several, the one whose name or
     /// project is <paramref name="named"/>'s name (the stub starts &lt;Stub&gt;-&lt;Platform&gt;-Shipping.exe) or the install
     /// folder's. Null when there is none, or several and none or more than one tied (said to <paramref name="ambiguous"/>).</summary>
     public static string? ShippingExe(string installDir, string? named = null, Action<string>? ambiguous = null)
@@ -77,9 +93,10 @@ public static class GameFiles
         try
         {
             var unrealRoot = Directory.Exists(Path.Combine(installDir, "Engine"));
+            var excluded = XboxSource.NotTheGame(installDir);
             all = UnrealFolders(installDir)
                 .SelectMany(d => Directory.EnumerateFiles(d, "*-Shipping.exe", Flat))
-                .Where(f => IsShipping(f) && !IsEngineFolder(installDir, f) && !InStaging(installDir, f) && !IsHelper(f)
+                .Where(f => IsShipping(f) && !excluded.Contains(Path.GetFullPath(f)) && !IsEngineFolder(installDir, f) && !InStaging(installDir, f) && !IsHelper(f)
                     && !NotTheGameBuild.Any(n => BuildName(f).Contains(n, StringComparison.OrdinalIgnoreCase))
                     && (unrealRoot || Directory.Exists(Path.Combine(Path.GetDirectoryName(ProjectDir(f))!, "Engine"))))
                 .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
@@ -220,6 +237,48 @@ public static class GameFiles
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidOperationException) { return null; }
     }
 
+    /// <summary>Streamline's interposer is beside the exe and nothing the exe imports statically, itself or through the DLLs of
+    /// its folder, imports d3d12.dll: the first d3d12.dll comes with Streamline's plugins. NVIDIA's downloaded plugins load
+    /// System32's, so the recorder never loads. An import found in neither the exe's folder nor System32 (API sets aside) is
+    /// resolved somewhere this can't follow: null, as for a module that can't be read. A DLL of the exe's folder that forwards
+    /// an export to d3d12 counts as importing it. <paramref name="files"/> gets the exe folder's files the answer depends on:
+    /// sl.interposer.dll and each import's path there, found or not (<see cref="Stamp"/>).</summary>
+    internal static bool? StreamlineFirst(string exe, List<string> files)
+    {
+        var dir = Path.GetDirectoryName(exe)!;
+        var interposer = Path.Combine(dir, "sl.interposer.dll");
+        files.Add(interposer);
+        if (!File.Exists(interposer)) return false;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var todo = new Stack<(string Path, bool Local)>([(exe, true)]);
+        try
+        {
+            while (todo.TryPop(out var module))
+            {
+                using var pe = PeFile.Open(module.Path);
+                if (module.Local && PeFile.Forwarders(pe).Any(f => f.StartsWith("d3d12.", StringComparison.OrdinalIgnoreCase))) return false;
+                foreach (var dll in CarvedReader.PeImports(pe, delayed: false))
+                {
+                    if (dll.Equals("d3d12.dll", StringComparison.OrdinalIgnoreCase)) return false;
+                    if (dll.StartsWith("api-ms-", StringComparison.OrdinalIgnoreCase) || dll.StartsWith("ext-ms-", StringComparison.OrdinalIgnoreCase) || !seen.Add(dll)) continue;
+                    var local = Path.Combine(dir, dll);
+                    files.Add(local);
+                    if (File.Exists(local)) todo.Push((local, true));
+                    else if (Path.Combine(SystemDir, dll) is var system && File.Exists(system)) todo.Push((system, false));
+                    else return null;
+                }
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or BadImageFormatException or InvalidOperationException) { return null; }
+        return true;
+    }
+
+    internal static string SystemDir { get; set; } = Environment.SystemDirectory;   // replaceable for tests
+
+    /// <summary>Each file's size and write time ("-" when missing), to tell when a cached answer about them is stale.</summary>
+    internal static string Stamp(IEnumerable<string> files) =>
+        string.Join('|', files.Select(f => new FileInfo(f) is { Exists: true } i ? $"{i.Length}:{i.LastWriteTimeUtc.Ticks}" : "-"));
+
     /// <summary>The exes near the install root (as <see cref="FindExe"/> looks) that import a graphics API.</summary>
     internal static IEnumerable<string> GraphicsExes(string installDir) => Directory.EnumerateFiles(installDir, "*.exe", Deep)
         .Where(f => !NotTheGame.Any(s => Path.GetRelativePath(installDir, f).Contains(s, StringComparison.OrdinalIgnoreCase)) && !IsEngineFolder(installDir, f) && !InStaging(installDir, f) && !IsHelper(f))
@@ -264,6 +323,9 @@ public static class GameFiles
     static extern uint GetFinalPathNameByHandleW(Microsoft.Win32.SafeHandles.SafeFileHandle h, char[] name, int size, uint flags);
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle h, int infoClass, byte[] info, int size);
+
+    /// <summary>The folder's own name, also from a path ending in a separator (Ubisoft Connect's end in "/").</summary>
+    public static string FolderName(string dir) => Path.GetFileName(Path.TrimEndingDirectorySeparator(dir));
 
     /// <summary>An install folder compared across sources: full path, no trailing separator (a drive root keeps its own).</summary>
     public static string DirKey(string dir) => dir.Length == 0 ? dir : Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir));
@@ -318,6 +380,7 @@ public static class GameFiles
         ("HShield", AntiCheat.Other),
         ("PunkBuster", AntiCheat.Other), ("PnkBstrA.exe", AntiCheat.Other), ("pbsvc.exe", AntiCheat.Other), ("pbsv.dll", AntiCheat.Other),
         ("equ8_conf.json", AntiCheat.Other),
+        (".build.info", AntiCheat.Other), (".product.db", AntiCheat.Other),   // Battle.net's install: a Blizzard game another store lists, or one added by hand
         ("Warframe.x64.exe", AntiCheat.Other),   // Digital Extremes' own client-side detection: no driver or folder of its own
         ("gameguard.des", AntiCheat.Other),
         ("DenuvoAC", AntiCheat.Other), ("denuvo-anti-cheat.sys", AntiCheat.Other), ("denuvo-anti-cheat-runtime.dll", AntiCheat.Other),

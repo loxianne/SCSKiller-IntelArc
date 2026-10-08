@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using SCSKiller.Core.App;
 
-// The offline half of the signed update feed (docs/patreon-and-updates.md §4.3). Same code as the client's check (FeedTrust).
+// The offline half of the signed update feed. Same code as the client's check (FeedTrust).
 //   keygen <key-file>                                                         new key; prints the public key to pin
 //   sign <releases.<c>.json> --key <key-file> --kid rel-a [--channel <c>]     writes <feed>.sig
 //   verify <releases.<c>.json> [--pub <base64>] [--kid rel-a] [--channel <c>] checks <feed>.sig (no --pub: the pinned keys)

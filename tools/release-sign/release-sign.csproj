@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Offline feed signing (docs/patreon-and-updates.md §4.3). Private tooling: never in SCSKiller.slnx. -->
+  <!-- Offline feed signing. Private tooling: never in SCSKiller.slnx. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

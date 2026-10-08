@@ -449,6 +449,22 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.Equal([(other.Sha1, RtCollections.NoConfig)], Items(plan).Select(y => (y.Library, y.Flags)));
     }
 
+    /// <summary>Kuro's 4.26 fork (Wuthering Waves) without a recording: its root signatures aren't 4.26's, so nothing is
+    /// synthesized, ray tracing collections included, where stock 4.26 gets its collection.</summary>
+    [Fact]
+    public void KuroForkSynthesizesNothingWithoutARecording()
+    {
+        var dir = Ff7.TempDir("rt-kuro");
+        var stock = new Planner().Build(Ff7.Game, Ue427 with { Version = "4.26" }, Index(), null, Nvidia, Path.Combine(dir, "stock"), null, CancellationToken.None);
+        Assert.Single(Items(stock));
+        var log = new List<string>();
+        var kuro = new Planner().Build(Ff7.Game, Ue427 with { Version = "4.26", Fork = "GAME_WutheringWaves" }, Index(), null, Nvidia, Path.Combine(dir, "kuro"),
+            new Log(log.Add), CancellationToken.None);
+        Assert.Empty(Items(kuro));
+        Assert.Equal(0, kuro.Stats.Generated);
+        Assert.Contains(log, l => l.Contains("no collection rule"));
+    }
+
     /// <summary>UE 4.25 without a recording: 4.26's global root signature without the NVAPI slot, with 4.25's static samplers
     /// (s1000-s1005, space 0), no state object config, payload 64 (Returnal's recording: 401 of its 403 collections rebuilt).</summary>
     [Fact]
@@ -612,7 +628,6 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
     {
         var game = new SCSKiller.Core.Games.SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:990080");
         if (game == null) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("rt-hogwarts-data"));
         var engine = reader.Detect(game)!;
         if (Ff7.Recording(game, engine, reader, "rt-hogwarts-rec") is not { } db) return;
@@ -655,7 +670,6 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
     {
         var game = new SCSKiller.Core.Games.XboxSource().Discover().FirstOrDefault(g => g.Id.StartsWith("xbox:BethesdaSoftworks.ProjectAltar"));
         if (game == null) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("rt-oblivion-data"));
         var engine = reader.Detect(game)!;
         if (Ff7.Recording(game, engine, reader, "rt-oblivion-rec") is not { } db) return;
@@ -699,7 +713,6 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
     {
         var game = new SCSKiller.Core.Games.SteamSource().Discover().FirstOrDefault(g => g.Id == "steam:2989180");
         if (game == null) return;
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("rt-darwin-data"));
         var engine = reader.Detect(game)!;
         Assert.Equal(("5.4", null), (engine.Version, engine.Fork));
@@ -719,7 +732,6 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
     static readonly Game Jedi = new("ea:198300", "STAR WARS Jedi: Survivor", Store.EA, JediInstall, Path.Combine(JediInstall, @"SwGame\Binaries\Win64\JediSurvivor.exe"));
     static readonly Lazy<(UnrealReader Reader, EngineInfo Engine)> JediReader = new(() =>
     {
-        Ff7.Codecs();
         var reader = new UnrealReader(Ff7.TempDir("rt-jedi-data"));
         return (reader, reader.Detect(Jedi)!);
     });
@@ -816,7 +828,6 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
     {
         var game = SCSKiller.Tests.FromSoft.FromSoftGameTests.Games["ER"].Game;
         if (!File.Exists(game.ExePath)) return;
-        Ff7.Codecs();
         var reader = new SCSKiller.Core.FromSoft.FromSoftReader(Ff7.TempDir("rt-er-data"));
         var engine = reader.Detect(game)!;
         var index = reader.Index(game, engine, null, CancellationToken.None);
@@ -854,7 +865,7 @@ public class RtCollectionTests(Xunit.Abstractions.ITestOutputHelper output)
 
         if (mode == "warp")
         {
-            var luid = Process.Start(new ProcessStartInfo(Path.Combine(Ff7.ProxyBin, "selftest.exe"), "warpluid") { RedirectStandardOutput = true })!.StandardOutput.ReadToEnd().Trim();
+            var luid = Process.Start(new ProcessStartInfo(Path.Combine(Ff7.ProxyBin, "selftest.exe"), "warpluid") { RedirectStandardOutput = true, Environment = { ["SCSKILLER_SELFTEST_UNARMED"] = "1" } })!.StandardOutput.ReadToEnd().Trim();
             var r = Run("scsktrter_warp.exe", "--adapter-luid", luid);
             output.WriteLine($"WARP: {r.Done} created, {r.Failed} failed ({Stats(r.Ms)})");
             Assert.True(r.Done == Read(Path.Combine(work, "scskiller_gen.db")).Count(x => x.Tag == 'R') && r.Failed == 0, r.Log[^Math.Min(r.Log.Length, 3000)..]);

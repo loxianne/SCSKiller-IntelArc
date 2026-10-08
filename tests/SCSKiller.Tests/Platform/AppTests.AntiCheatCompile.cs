@@ -57,7 +57,79 @@ public partial class AppTests
     public async Task An_anti_cheat_game_with_no_plan_source_is_unsupported()
     {
         var s = (await AntiCheatGame().ScanAsync(default)).Single();
-        Assert.Equal((GameStatus.Unsupported, "needs a recording, which EasyAntiCheat blocks"), (s.Status, s.StatusReason));
+        Assert.Equal((GameStatus.Unsupported, "needs a recording, which EasyAntiCheat blocks", true), (s.Status, s.StatusReason, s.NotPlanned));   // "Not supported"
+    }
+
+    /// <summary>An EasyAntiCheat game an offline session can record (Games.OfflineEac), with no recording yet: "Needs an offline
+    /// session", a NeedsRecording status with its own reason, the game page's action. With a recording it compiles as usual (below).</summary>
+    [Fact]
+    public Task An_offline_session_game_without_a_recording_needs_one() => Listed(async () =>
+    {
+        var s = (await AntiCheatGame().ScanAsync(default)).Single();
+        Assert.Equal((GameStatus.NeedsRecording, "EasyAntiCheat blocks the recorder, but you can record at your own risk with an offline session.", false),
+            (s.Status, s.StatusReason, s.NotPlanned));
+        Assert.True(ScsKiller.NeedsOfflineSession(s) && s.OfflineEligible);
+        Assert.Equal(s.StatusReason, Format.ShortNote(s));
+        Assert.Equal(s.StatusReason, Format.ShortNote(s with { RecorderInstalled = true }));   // an offline session under way keeps the line
+        Assert.Empty(StutterList.Recommended([s with { KnownStutter = new KnownStutter(StutterSeverity.Severe, "", "", "2026-01-01") }]));   // a ban risk isn't recommended
+    });
+
+    [Fact]
+    public Task An_offline_session_game_with_a_recording_compiles() => Listed(async () =>
+    {
+        var k = AntiCheatGame();
+        WriteRecording(Path.Combine(k.Store.GameDir(_game.Id), "recording.db"));
+        var s = (await k.ScanAsync(default)).Single();
+        Assert.Equal(GameStatus.Ready, s.Status);
+        Assert.False(ScsKiller.NeedsOfflineSession(s));
+        await k.RecordingMigration.WaitAsync(TimeSpan.FromSeconds(10));
+    });
+
+    /// <summary>A recording that still leaves it needing one (AMD: no draws) isn't "no recording yet": "Not supported".</summary>
+    [Fact]
+    public Task An_offline_session_game_whose_recording_isnt_enough_is_not_supported() => Listed(async () =>
+    {
+        Directory.CreateDirectory(Path.Combine(_game.InstallDir, "EasyAntiCheat"));
+        var k = Killer(new FakeReader(Unreal), new UpdatedPlanner(recorded: true), game: _game with { Version = "4" });   // version "4": always NeedsRecording
+        WriteRecording(Path.Combine(k.Store.GameDir(_game.Id), "recording.db"));
+        var s = (await k.ScanAsync(default)).Single();
+        Assert.Equal((GameStatus.Unsupported, true, false), (s.Status, s.NotPlanned, ScsKiller.NeedsOfflineSession(s)));
+        await k.RecordingMigration.WaitAsync(TimeSpan.FromSeconds(10));
+    });
+
+    /// <summary>A failed evaluation of such a game shows its error as "Not supported yet": the error may pass.</summary>
+    [Fact]
+    public async Task An_anti_cheat_game_that_cant_be_read_is_not_supported_yet()
+    {
+        var k = AntiCheatGame();
+        Assert.True((await k.ScanAsync(default)).Single().NotPlanned);
+        SetWriteTime(_game.ExePath, Unreadable);
+        var s = (await k.ScanAsync(default)).Single();
+        Assert.Equal((GameStatus.Unsupported, UnreadableReason, false), (s.Status, s.StatusReason, s.NotPlanned));
+    }
+
+    /// <summary>An "unsupported-yet" verdict keeps "Not supported yet" on an anti-cheat game that needs a recording too.</summary>
+    [Fact]
+    public async Task An_unsupported_yet_verdict_on_an_anti_cheat_game_stays_not_supported_yet()
+    {
+        try
+        {
+            GameVerdicts.Current = GameVerdicts.TryParse(Verdicts(GameVerdicts.UnsupportedYetVerdict, "engine-unreadable", _game.Id))!;
+            var s = (await AntiCheatGame().ScanAsync(default)).Single();
+            Assert.Equal((GameStatus.Unsupported, "SCSKiller can't read this game's shaders yet", false), (s.Status, s.StatusReason, s.NotPlanned));
+        }
+        finally { GameVerdicts.Current = GameVerdicts.Embedded; }
+    }
+
+    /// <summary>Wuthering Waves (Kuro's 4.26 fork) in its Anti-Cheat Expert install plans only from a recording its anti-cheat
+    /// blocks: "Not supported", like any anti-cheat game that needs a recording.</summary>
+    [Fact]
+    public async Task Wuthering_Waves_with_its_anti_cheat_is_not_supported()
+    {
+        Directory.CreateDirectory(Path.Combine(_game.InstallDir, "AntiCheatExpert"));
+        var engine = Unreal with { Fork = "GAME_WutheringWaves", Unsupported = "needs a recording, which its anti-cheat blocks" };
+        var s = (await Killer(new FakeReader(engine), new Planner()).ScanAsync(default)).Single();
+        Assert.Equal((AntiCheat.Other, GameStatus.Unsupported, "needs a recording, which its anti-cheat blocks", true), (s.AntiCheat, s.Status, s.StatusReason, s.NotPlanned));
     }
 
     /// <summary>A game added by hand and recorded, then listed by a store (a launcher SCSKiller finds since) that flags its

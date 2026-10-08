@@ -30,6 +30,20 @@ public static class PeFile
         for (var i = 0; i < count && names.RemainingBytes >= 4; i++) yield return Str(pe, names.ReadInt32());
     }
 
+    /// <summary>The forwarded exports' targets ("dll.Function", "dll.#ordinal"), in table order.</summary>
+    public static IEnumerable<string> Forwarders(PEReader pe)
+    {
+        if (ExportDirectory(pe) is not { } d) yield break;
+        var dir = pe.PEHeaders.PEHeader!.ExportTableDirectory;
+        d.Offset = 20;
+        var count = d.ReadInt32();
+        d.Offset = 28;
+        var functions = Data(pe, d.ReadInt32());
+        for (var i = 0; i < count && functions.RemainingBytes >= 4; i++)
+            if (functions.ReadInt32() is var rva && rva >= dir.RelativeVirtualAddress && rva < dir.RelativeVirtualAddress + dir.Size)
+                yield return Str(pe, rva);   // an RVA inside the export directory is a forwarder string
+    }
+
     /// <summary>The data an exported variable's RVA points at (e.g. the Agility SDK's D3D12SDKVersion); null if not exported.</summary>
     public static BlobReader? ExportData(PEReader pe, string name)
     {

@@ -51,6 +51,12 @@
                 </Grid>
             </Border>
 
+            <StackPanel Spacing="8">
+                <TextBlock Text="Use at your own risk" Style="{StaticResource Section}" />
+                <TextBlock Text="SCSKiller is provided as is, without warranty. It checks each game for anti-cheat before adding its recorder, but that check can miss one. You use it at your own risk, and its authors are not responsible for bans, crashes or lost data."
+                           Style="{StaticResource Secondary}" TextWrapping="Wrap" />
+            </StackPanel>
+
             <Expander x:Name="TrademarksBox" Header="Trademarks" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <TextBlock Text="{x:Bind Vm.Trademarks}" Style="{StaticResource Secondary}" TextWrapping="Wrap" LineHeight="22" IsTextSelectionEnabled="True" />
             </Expander>

@@ -1,11 +1,11 @@
 # A version tag builds, tests and packages exactly like build.yml, then creates a DRAFT GitHub Release with the
-# UNSIGNED zip, SHA256SUMS-unsigned.txt and the CHANGELOG.md section. CI stops there (docs/release-process.md §3.1):
-# build/release.ps1 (run locally) downloads these bytes, checks them, signs them (cloud HSM: no signing key or
+# UNSIGNED zip, SHA256SUMS-unsigned.txt and the CHANGELOG.md section. CI stops there:
+# the release step (run locally) downloads these bytes, checks them, signs them (cloud HSM: no signing key or
 # certificate in CI, ever), runs vpk pack, signs the feed with the offline key and publishes. Nothing here publishes.
 #
-# Channel by repo (§10.3): the private repo releases beta/alpha tags (with '-', v1.5.0-beta.1), the public repo stable
+# Channel by repo: the private repo releases beta/alpha tags (with '-', v1.5.0-beta.1), the public repo stable
 # tags (v1.5.0). server-v* tags are not v* and belong to a separate private Linux workflow (not written yet).
-# -internal tags are built on demand (build.yml workflow_dispatch on the tag) or on a local PC (§4.1): no draft.
+# -internal tags are built on demand (build.yml workflow_dispatch on the tag) or on a local PC: no draft.
 name: release
 
 on:
@@ -41,7 +41,7 @@ jobs:
       - name: Check the zip against the sums
         run: grep '  SCSKiller.zip$' SHA256SUMS-unsigned.txt | sha256sum -c -
 
-      # Provenance in Sigstore's public log: stable builds on the public repo only (§3.1).
+      # Provenance in Sigstore's public log: stable builds on the public repo only.
       - if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8   # v4.2.2
         with:
@@ -52,7 +52,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           v="${TAG#v}"
-          [ -f CHANGELOG.md ] || { echo "::error::no CHANGELOG.md (docs/release-process.md §3.4)"; exit 1; }
+          [ -f CHANGELOG.md ] || { echo "::error::no CHANGELOG.md"; exit 1; }
           awk -v v="$v" '/^## /{ p = index($0, "[" v "]") > 0; next } p' CHANGELOG.md > notes.md
           [ -s notes.md ] || { echo "::error::CHANGELOG.md has no '## [$v]' section"; exit 1; }
 

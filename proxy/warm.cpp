@@ -151,6 +151,17 @@ static void emit(const char* fmt, ...) {
 
 static int fail(const std::wstring& msg) { return emit("{\"event\":\"error\",\"message\":%s}", json(msg).c_str()), 1; }
 
+// One argument as CommandLineToArgvW reads it back: backslashes are literal except in a run before a quote, which doubles.
+static std::wstring quoted(const std::wstring& a) {
+    std::wstring q = L"\"";
+    for (size_t i = 0;; ++i) {
+        size_t n = 0;
+        for (; i < a.size() && a[i] == L'\\'; ++i) ++n;
+        if (i == a.size()) return q.append(2 * n, L'\\') + L"\"";
+        q.append(a[i] == L'"' ? 2 * n + 1 : n, L'\\') += a[i];
+    }
+}
+
 // AGS 6.x ABI (amd_ags.h, GPUOpen AGS SDK, MIT): only what device creation needs
 struct AgsDeviceParams { IDXGIAdapter* adapter; IID iid; D3D_FEATURE_LEVEL level; };
 struct AgsExtensionParams { const wchar_t *app, *engine; unsigned app_version, engine_version, uav_slot; };
@@ -371,7 +382,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!o.d3d12.empty() && !RemoveDirectoryW((stage + L"D3D12").c_str()))
             fwprintf(stderr, L"removing the staged %lsD3D12 failed (error %lu)\n", stage.c_str(), GetLastError());
         if (stage == flat) return;
-        for (auto n : {L"scskiller.log", L"scskiller_creates.csv", L"scskiller_warm_times.csv"})
+        for (auto n : {L"scskiller.log", L"scskiller_creates.csv", L"scskiller_warm_times.csv", L"scskiller_failed.keys"})
             MoveFileExW((stage + n).c_str(), (flat + n).c_str(), 0);
         for (auto d = dirs.rbegin(); d != dirs.rend(); ++d) RemoveDirectoryW(d->c_str());  // only if empty
     }};
@@ -445,10 +456,20 @@ int wmain(int argc, wchar_t** argv) {
     }
     for (;;) {  // twice when the game's D3D12 runtime makes no device: then on the system's
         std::wstring args = L"--child " + std::to_wstring(me);
-        for (int i = 3; i < argc; ++i) args += L" \"" + std::wstring(argv[i]) + L"\"";
+        for (int i = 3; i < argc; ++i) args += L" " + quoted(argv[i]);
         if (sdk) args += L" --sdk " + std::to_wstring(sdk);
         fflush(stdout);
-        std::vector<std::thread> relays;
+        // joined on every return: a joinable std::thread's destructor calls std::terminate, which fails fast (0xC0000409)
+        struct Relays : std::vector<std::thread> {
+            void join() {
+                for (auto& t : *this) {  // a child that never connected leaves its relay in ConnectNamedPipe
+                    if (WaitForSingleObject(t.native_handle(), 1000) == WAIT_TIMEOUT) CancelSynchronousIo(t.native_handle());
+                    t.join();
+                }
+                clear();
+            }
+            ~Relays() { join(); }
+        } relays;
         PROCESS_INFORMATION pi = {};
         if (!o.package.empty()) {
             for (int fd : {1, 2}) {
@@ -513,10 +534,7 @@ int wmain(int argc, wchar_t** argv) {
                 break;
             }
         }
-        for (auto& t : relays) {  // a child that never connected leaves its relay in ConnectNamedPipe
-            if (WaitForSingleObject(t.native_handle(), 1000) == WAIT_TIMEOUT) CancelSynchronousIo(t.native_handle());
-            t.join();
-        }
+        relays.join();
         if (stuck)
             return fail(L"the warm process didn't start replaying within " + std::to_wstring(start_turns / 10) + L" s" +
                         (o.layer.empty() ? L"" : L" (an add-on of the game's layer may hang outside the game)") + L"; ended it");
@@ -531,7 +549,9 @@ int wmain(int argc, wchar_t** argv) {
         }
         wchar_t hex[16];
         swprintf_s(hex, L"0x%08X", code);
-        if (code > 1 && code != 3) return fail(L"the warm process died (exit code " + std::wstring(hex) + L")");  // it printed no error line
+        // 3 is a retry only after the child's last line: abort() exits with 3 too
+        bool last_line = final_event && WaitForSingleObject(final_event, 0) == WAIT_OBJECT_0;
+        if (code > 1 && (code != 3 || !last_line)) return fail(L"the warm process died (exit code " + std::wstring(hex) + L")");  // it printed no error line
         return (int)code;
     }
 }

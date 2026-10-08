@@ -106,7 +106,7 @@ public class GameCachesTests : IDisposable
             Assert.Null(D3DSCache.IsGames(other, g));   // the game's: its WAL is read, and can't be: a doubt
     }
 
-    /// <summary>A test deletes the folders its own exes left since it started, nothing else.</summary>
+    /// <summary>A compile or a test deletes the folders its own exes left since it started, nothing else.</summary>
     [Fact]
     public void A_test_deletes_only_the_D3DSCache_folders_of_its_own_exes()
     {
@@ -122,8 +122,8 @@ public class GameCachesTests : IDisposable
         var older = FakeD3DSCache.Folder(d3ds, "07", Path.Combine(mine, "d.exe"));
         Directory.SetCreationTimeUtc(older, started.AddMinutes(-5));                                     // before this test
 
-        Assert.Equal([selftest, staged], TestD3DSCache.Made(d3ds, mine, started).Order());
-        Assert.Empty(TestD3DSCache.Made(Path.Combine(_root, "missing"), mine, started));
+        Assert.Equal([selftest, staged], D3DSCache.Made(d3ds, mine, started).Order());
+        Assert.Empty(D3DSCache.Made(Path.Combine(_root, "missing"), mine, started));
     }
 
     [Fact]

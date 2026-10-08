@@ -53,6 +53,30 @@ public class AmdAgsTests : IDisposable
     }
 
     [Fact]
+    public void An_exe_that_cannot_be_read_may_use_AGS()
+    {
+        var g = Layout("9554CD53", @"NWD\Binaries\WinGDK\NWD-WinGDK-Shipping.exe");
+        var me = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+        var deny = new System.Security.AccessControl.FileSystemAccessRule(me, System.Security.AccessControl.FileSystemRights.ReadData,
+            System.Security.AccessControl.AccessControlType.Deny);
+        var exe = new FileInfo(g.ExePath);
+        var acl = exe.GetAccessControl();
+        acl.AddAccessRule(deny);
+        exe.SetAccessControl(acl);
+        try
+        {
+            Assert.Null(AmdAgs.UsesAgs(g.ExePath));
+            Assert.Equal(new AgsRegistration("NWD", "UnrealEngine5.1", ExeUnread: true), AmdAgs.Of(g, Ue56 with { Version = "5.1" }));
+            Assert.Null(AmdAgs.Of(g, Ue56 with { Version = "4.24" }));
+        }
+        finally
+        {
+            acl.RemoveAccessRule(deny);
+            exe.SetAccessControl(acl);
+        }
+    }
+
+    [Fact]
     public void AGS_linked_into_the_exe_shows_in_its_exports()
     {
         var dll = Path.Combine(TestEnv.RepoRoot, "proxy", "build", "Release", AmdAgs.DllName);   // exports the AGS API; built with the proxy

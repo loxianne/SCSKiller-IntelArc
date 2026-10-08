@@ -171,7 +171,7 @@ public class ExactLayoutsTests(ITestOutputHelper output)
         while (root != null && !File.Exists(Path.Combine(root.FullName, "SCSKiller.slnx"))) root = root.Parent;
         var exe = root == null ? null : Path.Combine(root.FullName, "proxy", "build", "Release", "selftest.exe");
         if (exe == null || !File.Exists(exe)) return; // this checkout's proxy isn't built
-        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, "layoutrules") { RedirectStandardOutput = true })!;
+        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, "layoutrules") { RedirectStandardOutput = true, Environment = { ["SCSKILLER_SELFTEST_UNARMED"] = "1" } })!;
         var rows = p.StandardOutput.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(l => l.Split(' ')).ToDictionary(f => f[0], f => f[1] == "0x00000000");
         p.WaitForExit();

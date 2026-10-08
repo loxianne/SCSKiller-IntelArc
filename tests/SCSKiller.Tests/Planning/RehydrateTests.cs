@@ -107,7 +107,6 @@ public class RehydrateTests(ITestOutputHelper output)
         try { game = new SteamSource().Discover().FirstOrDefault(g => g.Id == Ff7.Game.Id); }
         catch (Exception) { return; } // no Steam
         if (game == null) return;
-        Ff7.Codecs();
         var dir = Ff7.TempDir("rehydrate-ff7");
         var reader = new UnrealReader(Path.Combine(dir, "data"));
         var engine = reader.Detect(game)!;

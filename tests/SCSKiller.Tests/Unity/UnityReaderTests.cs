@@ -236,4 +236,54 @@ public class UnityReaderTests
         Assert.Throws<ObjectDisposedException>(() => b.Read(0, content.Length));
         Directory.Delete(dir, true);
     }
+
+    /// <summary>A bundle keeps the 16 blocks it read last, not all of them: a block read again after 16 others is
+    /// decompressed again; one still kept isn't. Reads at any offset find their block.</summary>
+    [Fact]
+    public void ABundleKeepsOnlyItsLastReadBlocks()
+    {
+        var dir = Temp();
+        var path = Path.Combine(dir, "x.bundle");
+        const int Size = 100, Kept = 16, Count = 3 * Kept;
+        var content = Enumerable.Range(0, Size * Count).Select(i => (byte)(i * 7 + i / 251)).ToArray();
+        File.WriteAllBytes(path, StoredBundle(content, "CAB-0123", Size));
+        using (var b = UnityFiles.Bundle.Open(path)!)
+        {
+            foreach (var at in new[] { 0, 1, 99, 100, 150, 4795 }) Assert.Equal(content[at..(at + 5)], b.Read(at, 5));
+            var before = b.BlocksDecompressed;
+            b.Read(0, 1);
+            Assert.Equal(before, b.BlocksDecompressed);   // block 0 was read just now
+            for (var i = 1; i <= Kept; i++) b.Read(i * Size, 1);
+            before = b.BlocksDecompressed;
+            b.Read(0, 1);
+            Assert.Equal(before + 1, b.BlocksDecompressed);
+            Assert.Equal(content, b.Read(0, content.Length));
+        }
+        Directory.Delete(dir, true);
+    }
+
+    /// <summary>A UnityFS (format 8) bundle holding one node, its data in uncompressed blocks of <paramref name="size"/> bytes.</summary>
+    static byte[] StoredBundle(byte[] content, string node, int size)
+    {
+        var info = new List<byte>(new byte[16]);
+        var n = (content.Length + size - 1) / size;
+        info.AddRange(Be(n));
+        for (var i = 0; i < n; i++)
+        {
+            var len = Math.Min(size, content.Length - i * size);
+            info.AddRange([.. Be(len), .. Be(len), 0, 0]);
+        }
+        info.AddRange([.. Be(1), .. Be64(0), .. Be64(content.Length), .. Be(4), .. Encoding.ASCII.GetBytes(node), 0]);
+        var w = new List<byte>();
+        w.AddRange([.. Encoding.ASCII.GetBytes("UnityFS"), 0, .. Be(8), .. Encoding.ASCII.GetBytes("5.x.x"), 0, .. Encoding.ASCII.GetBytes("2022.3.1f1"), 0]);
+        var sizeAt = w.Count;
+        w.AddRange([.. Be64(0), .. Be(info.Count), .. Be(info.Count), .. Be(0x40 | 0x200)]);
+        while (w.Count % 16 != 0) w.Add(0);
+        w.AddRange(info);
+        while (w.Count % 16 != 0) w.Add(0);
+        w.AddRange(content);
+        var bytes = w.ToArray();
+        BinaryPrimitives.WriteInt64BigEndian(bytes.AsSpan(sizeAt), bytes.Length);
+        return bytes;
+    }
 }

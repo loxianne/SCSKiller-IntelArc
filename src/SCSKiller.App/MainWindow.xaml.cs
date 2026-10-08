@@ -21,6 +21,8 @@ public sealed partial class MainWindow : Window
     const int MinWidth = 1072, MinHeight = 640;
 
     bool syncingNav;
+    AppStore? placement;   // where window.json goes (RestorePlacement); none: the screenshots' window is never saved
+    bool maximizeOnShow;
     readonly (NavigationViewItem Item, Type Page)[] pages;
 
     public MainWindow()
@@ -39,6 +41,7 @@ public sealed partial class MainWindow : Window
         ShowUpdate();
         AppWindow.Closing += (w, e) =>
         {
+            SavePlacement();
             switch (WindowClose.Of(App.Core.Settings, App.Quitting, App.HidesOnClose))
             {
                 case CloseAction.Quit:
@@ -51,6 +54,12 @@ public sealed partial class MainWindow : Window
                     App.HideToTray();
                     break;
             }
+        };
+        AppWindow.Changed += (w, e) =>
+        {
+            if (!e.DidVisibilityChange || !w.IsVisible || !maximizeOnShow) return;
+            maximizeOnShow = false;
+            ((OverlappedPresenter)w.Presenter).Maximize();
         };
     }
 
@@ -83,6 +92,7 @@ public sealed partial class MainWindow : Window
     {
         UpdateButton.IsEnabled = false;
         UpdateText.Text = "Finishing the compile…";
+        SavePlacement();   // the restart exits without closing the window
         if (await Updater.RestartAsync()) return;   // exits
         (UpdateButton.IsEnabled, UpdateText.Text) = (true, "Restart to update");
         ShowUpdate();
@@ -95,6 +105,19 @@ public sealed partial class MainWindow : Window
         // a game's page belongs to Library: the window's first load selects Library after a toast opened a game
         if (ContentFrame.SourcePageType != page && !(page == typeof(LibraryPage) && ContentFrame.SourcePageType == typeof(DetailPage)))
             ContentFrame.Navigate(page);
+    }
+
+    // On a game's page Library stays selected, so clicking it raises no SelectionChanged.
+    void OnNavInvoked(NavigationView _, NavigationViewItemInvokedEventArgs e)
+    {
+        if (e.InvokedItemContainer == LibraryItem && ContentFrame.SourcePageType == typeof(DetailPage)) ShowLibrary();
+    }
+
+    /// <summary>Back to the Library list from a game's page, at its scroll position when it is the page behind.</summary>
+    public void ShowLibrary()
+    {
+        if (ContentFrame.CanGoBack && ContentFrame.BackStack[^1].SourcePageType == typeof(LibraryPage)) ContentFrame.GoBack();
+        else Navigate(typeof(LibraryPage));
     }
 
     void OnNavigated(object _, NavigationEventArgs e)
@@ -114,6 +137,40 @@ public sealed partial class MainWindow : Window
     {
         var presenter = (OverlappedPresenter)AppWindow.Presenter;
         (presenter.PreferredMinimumWidth, presenter.PreferredMinimumHeight) = ((int)(MinWidth * Scale), (int)(MinHeight * Scale));
+    }
+
+    /// <summary>Puts the window where it was last closed (window.json in <paramref name="store"/>'s folder): its restored
+    /// bounds, and maximized once it shows if it was. Never shows it: a --tray start stays in the notification area. Bounds
+    /// on a monitor that's gone are moved onto one by Windows (SetWindowPlacement).</summary>
+    public void RestorePlacement(AppStore store)
+    {
+        placement = store;
+        if (store.LoadWindow() is not { } saved) return;
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        var wp = new WindowPlacement { Length = Marshal.SizeOf<WindowPlacement>(), ShowCmd = SwHide,
+                                       Normal = new(saved.Left, saved.Top, saved.Left + saved.Width, saved.Top + saved.Height) };
+        var dpi = GetDpiForWindow(hwnd);
+        SetWindowPlacement(hwnd, ref wp);
+        // moved onto a monitor of another scale: WM_DPICHANGED resized it on the way, and the minimums were the old monitor's.
+        // It is there now, so with this monitor's minimums the bounds stick.
+        if (GetDpiForWindow(hwnd) != dpi)
+        {
+            SetMinimumSize();
+            SetWindowPlacement(hwnd, ref wp);
+        }
+        maximizeOnShow = saved.Maximized;
+    }
+
+    /// <summary>Saves where the window is (<see cref="RestorePlacement"/>) while it shows: as it closes, quits, restarts to
+    /// update or Windows ends the session. Hidden, it keeps what was saved as it hid.</summary>
+    public void SavePlacement()
+    {
+        if (placement == null || !AppWindow.IsVisible) return;
+        var wp = new WindowPlacement { Length = Marshal.SizeOf<WindowPlacement>() };
+        if (!GetWindowPlacement(WinRT.Interop.WindowNative.GetWindowHandle(this), ref wp)) return;
+        var r = wp.Normal;   // the restored bounds, also while maximized or minimized
+        try { placement.SaveWindow(new(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top, WindowBounds.WasMaximized(wp.ShowCmd, wp.Flags))); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }   // the next start opens at the default
     }
 
     /// <summary>Shows the window off-screen, never activated and not in the task switcher: the user may be gaming.</summary>
@@ -232,12 +289,25 @@ public sealed partial class MainWindow : Window
                 foreach (var (name, id) in new[] { ("hogwarts", "steam:990080"), ("ff7", ff7), ("ghostrunner", "steam:1139900"),
                                                    ("palworld", "xbox:1623730"), ("eldenring", "steam:1245620"),
                                                    ("atomicheart", "xbox:Sample.AtomicHeart"), ("darwin", "epic:3300000"), ("townfall", "steam:3600000"),
-                                                   ("added", "manual:5f1c0e9a2b7d4c30") })
+                                                   ("added", "manual:5f1c0e9a2b7d4c30"), ("tekken", "steam:1778820"), ("racer", "steam:4078430"), ("unreached", "xbox:Sample.HollowCircuit"), ("bothapis", "gaijin:warthunder"),
+                                                   ("guess-both", "xbox:CoffeeStainStudios.DeepRockGalactic"),
+                                                   ("guess-version", "steam:3900010"), ("guess-dx", "steam:3900020"), ("rebound", "steam:1292630"),
+                                                   ("ran-other-exe", "ubisoft:13504"), ("game-changed", "steam:3900030"), ("never-loaded", "steam:3900040") })
                 {
                     Navigate(typeof(DetailPage), id);
                     string file = $"d-{name}-{size}";
                     await Shot(file);
                     if (ContentFrame.Content is DetailPage d && d.ScrollToEnd()) await Shot(file, 400, "-end");
+                    if (name == "tekken" && ContentFrame.Content is DetailPage partly)   // the Why? dialog, rendered on its own
+                    {
+                        var why = partly.PartlyWhyDialog();
+                        why.RequestedTheme = Root.RequestedTheme;
+                        _ = App.ShowAsync(why);
+                        await Task.Delay(800);
+                        await SavePngAsync(why, Path.Combine(dir, $"d-tekken-why-{size}-{Root.RequestedTheme.ToString().ToLowerInvariant()}.png"));
+                        why.Hide();
+                        await Task.Delay(300);
+                    }
                     if (name == "ff7" && ContentFrame.Content is DetailPage open)   // every count, under Details
                     {
                         open.ShowDetails();
@@ -258,7 +328,7 @@ public sealed partial class MainWindow : Window
             Navigate(typeof(LibraryPage));
             var library = (LibraryPage)ContentFrame.Content;
             // library-groups: Palworld's icon (a real exe) after the detail pages showed it at 56 px: it must not come back empty
-            foreach (var (name, search) in new[] { ("library-back", ""), ("library-search", "life"), ("library-nomatch", "zelda"), ("library-rt", "darwin"), ("library-groups", "") })
+            foreach (var (name, search) in new[] { ("library-back", ""), ("library-search", "life"), ("library-nomatch", "zelda"), ("library-rt", "darwin"), ("library-partly", "tekken"), ("library-unsupported", "racer"), ("library-unreached", "hollow"), ("library-bothapis", "thunder"), ("library-guessed", "guessed"), ("library-offline", "elden"), ("library-nothing-recorded", "valhalla"), ("library-groups", "") })
             {
                 library.SearchText = search;
                 await Task.Delay(400);
@@ -284,8 +354,21 @@ public sealed partial class MainWindow : Window
             await Shot("library-min", part: "-end");
         }
 
-        // An Intel GPU: the Library says it can't compile there.
+        // A compile over 16 GB queued: its warning on NVIDIA past the 16 GB limit ("queue" has the cache close to it), then on AMD.
         Resize(1280);
+        fake.Enqueue("steam:1285190");
+        foreach (var (name, gpu) in new[] { ("queue-large", (GpuInfo?)null), ("queue-large-amd", new GpuInfo(GpuVendor.Amd, "AMD Radeon", "25.10.1", 0, 16UL << 30)) })
+        {
+            if (gpu != null) { fake.Vendor = new UnsupportedVendor(gpu); ShowGpu(); }
+            foreach (var theme in themes)
+            {
+                Root.RequestedTheme = theme;
+                Navigate(typeof(QueuePage));
+                await Shot(name);
+            }
+        }
+
+        // An Intel GPU: the Library says it can't compile there.
         fake.Vendor = new UnsupportedVendor(new GpuInfo(GpuVendor.Intel, "Intel Graphics", "32.0.101.6881", 0, 128UL << 20));
         ShowGpu();
         foreach (var theme in themes)
@@ -310,4 +393,11 @@ public sealed partial class MainWindow : Window
     }
 
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(nint hwnd);
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(nint hwnd, ref WindowPlacement wp);
+    [DllImport("user32.dll")] static extern bool SetWindowPlacement(nint hwnd, ref WindowPlacement wp);
+
+    const int SwHide = 0;
+
+    [StructLayout(LayoutKind.Sequential)] record struct NativeRect(int Left, int Top, int Right, int Bottom);
+    [StructLayout(LayoutKind.Sequential)] struct WindowPlacement { public int Length, Flags, ShowCmd; public PointInt32 Min, Max; public NativeRect Normal; }
 }

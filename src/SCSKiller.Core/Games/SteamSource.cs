@@ -76,8 +76,8 @@ public sealed class SteamSource(string? steamRoot = null) : IGameSource
         return types;
     }
 
-    /// <summary>The appinfo object (common, config...) of the given app ids from appinfo.vdf (binary KeyValues, v28 or v29;
-    /// format: tools/steamdata.py), streamed: other apps are skipped by their size. Null when the file is missing or not
+    /// <summary>The appinfo object (common, config...) of the given app ids from appinfo.vdf (binary KeyValues, v28 or v29),
+    /// streamed: other apps are skipped by their size. Null when the file is missing or not
     /// understood; an app that is absent or whose entry doesn't parse is just missing from the result.</summary>
     public static Dictionary<uint, Dictionary<string, object>>? Apps(string path, IReadOnlySet<uint> ids)
     {

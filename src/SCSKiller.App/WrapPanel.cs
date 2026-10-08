@@ -6,11 +6,13 @@ namespace SCSKiller.App;
 
 /// <summary>Lays children out left to right and wraps to a new line instead of clipping. With <see cref="MinItemWidth"/>:
 /// equal columns at least that wide, as many as divide the visible children evenly (4 cards: 4, 2 or 1 per row), each
-/// stretched to its row's tallest. Collapsed children take no place.</summary>
+/// stretched to its row's tallest. <see cref="LineAlignment"/>: each line flush left, centred or flush right. Collapsed
+/// children take no place.</summary>
 public sealed class WrapPanel : Panel
 {
     public double Spacing { get; set; } = 8;
     public double MinItemWidth { get; set; }
+    public HorizontalAlignment LineAlignment { get; set; } = HorizontalAlignment.Left;
 
     protected override Size MeasureOverride(Size available) => Layout(available.Width, arrange: false);
 
@@ -45,6 +47,11 @@ public sealed class WrapPanel : Panel
         foreach (var row in rows)
         {
             double h = row.Max(c => c.DesiredSize.Height), rx = 0;
+            if (arrange && col == 0 && LineAlignment is HorizontalAlignment.Right or HorizontalAlignment.Center)
+            {
+                double free = Math.Max(0, width - (row.Sum(c => c.DesiredSize.Width) + (row.Count - 1) * Spacing));
+                rx = LineAlignment == HorizontalAlignment.Right ? free : free / 2;
+            }
             foreach (var c in row)
             {
                 double w = col > 0 ? col : c.DesiredSize.Width;
