@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using SCSKiller.Core;
 using SCSKiller.Core.Carved;
@@ -252,6 +253,60 @@ public class CarvedReaderTests
 
             var index = reader.Index(game, engine, null, CancellationToken.None);
             Assert.Equal(2 * Pairs, index.Shaders.Count);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void PspcPipelineRecordsAreExtractedAccurately()
+    {
+        var dir = Ff7.TempDir("carved-pspc-records");
+        try
+        {
+            var vs1 = Hlsl.Vs(1, Hlsl.Rs1);
+            var vs2 = Hlsl.Vs(2, Hlsl.Rs1);
+            var ps1 = Hlsl.Ps(1, Hlsl.Rs1);
+            var ps2 = Hlsl.Ps(2, Hlsl.Rs1);
+            var cs1 = Hlsl.Cs(1);
+
+            var sec1Rel = 64u;
+            var sec2Rel = (uint)(sec1Rel + vs1.Length + vs2.Length);
+
+            var head = new byte[192];
+            "PSPC"u8.CopyTo(head.AsSpan(0, 4));
+            BinaryPrimitives.WriteUInt32LittleEndian(head.AsSpan(0x18), sec1Rel);
+            BinaryPrimitives.WriteUInt32LittleEndian(head.AsSpan(0x20), sec2Rel);
+            BinaryPrimitives.WriteUInt32LittleEndian(head.AsSpan(0x60), 2);
+
+            var table = new byte[64];
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(24, 4), 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(28, 4), 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32 + 24, 4), (uint)vs1.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(table.AsSpan(32 + 28, 4), (uint)ps1.Length);
+
+            using (var fs = File.Create(Path.Combine(dir, "ffxvi.pspc")))
+            {
+                fs.Write(head);
+                fs.Write(table);
+                fs.Write(vs1);
+                fs.Write(vs2);
+                fs.Write(ps1);
+                fs.Write(ps2);
+                fs.Write(cs1);
+            }
+            File.WriteAllBytes(Path.Combine(dir, "game.exe"), new byte[1024]);
+
+            var game = new Game("test:pspc-records", "pspc-rec", Store.Other, dir, Path.Combine(dir, "game.exe"));
+            var reader = new CarvedReader();
+            var engine = new EngineInfo(CarvedReader.Family, "DXBC", null, "D3D12", false, null);
+
+            var index = reader.Index(game, engine, null, CancellationToken.None);
+            Assert.Equal(5, index.Shaders.Count);
+            Assert.Equal(3, index.Maps.Count);
+            Assert.True(index.Maps.All(m => m.IsPipeline));
         }
         finally
         {

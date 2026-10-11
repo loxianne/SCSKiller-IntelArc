@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection.PortableExecutable;
@@ -111,6 +112,7 @@ public sealed class CarvedReader : IEngineReader
         var maps = new List<ShaderMap>();
         var mapHashes = new HashSet<string>();
         int records = 0;
+        string pspcNote = "";
         using var content = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
         void Stamp(string path)
         {
@@ -121,7 +123,8 @@ public sealed class CarvedReader : IEngineReader
         {
             var rel = Path.GetRelativePath(game.InstallDir, path);
             Stamp(path);
-            if ((path == dawnFile ? dawnRuns : Records(seq)) is { } runs)
+            var pspcRuns = Path.GetExtension(path).Equals(".pspc", StringComparison.OrdinalIgnoreCase) ? PspcRuns(path, seq, shaders, out pspcNote) : null;
+            if ((path == dawnFile ? dawnRuns : pspcRuns ?? Records(seq)) is { } runs)
                 foreach (var run in runs)
                 {
                     records++;
@@ -140,7 +143,7 @@ public sealed class CarvedReader : IEngineReader
         log?.Report($"{perFile.Count} files with shaders, {read / 1e9:F2} GB read: {shaders.Count} shaders ("
             + string.Join(", ", shaders.Values.GroupBy(s => s.Stage).OrderByDescending(g => g.Count()).Select(g => $"{g.Count()} {g.Key}"))
             + $"){(bad > 0 ? $", {bad} unparseable" : "")}, {rs} embedded root signatures, {records} pipeline records -> {maps.Count} maps ({maps.Count(m => m.IsPipeline)} exact)"
-            + string.Concat(platformOf.Values.GroupBy(p => p).Select(g => $"; {g.Count()} need {g.Key}, not planned for 32-lane GPUs")) + dawnNote + $" ({sw.Elapsed.TotalSeconds:F1}s)");
+            + string.Concat(platformOf.Values.GroupBy(p => p).Select(g => $"; {g.Count()} need {g.Key}, not planned for 32-lane GPUs")) + dawnNote + pspcNote + $" ({sw.Elapsed.TotalSeconds:F1}s)");
         return new ShaderIndex(Convert.ToHexStringLower(content.GetHashAndReset()), [Platform, .. platformOf.Values.Distinct().Order(StringComparer.Ordinal)], shaders, maps);
     }
 
@@ -192,6 +195,62 @@ public sealed class CarvedReader : IEngineReader
             + (several.Count > 0 ? $", {several.Count} used with several left without ({runs.Count(r => r.All(several.Contains))} records of only those plan nothing)" : "")
             + (unindexed + dawn.Skipped > 0 ? $"; left out: {unindexed} records with a shader not indexed, {dawn.Skipped} naming another stage" : "");
         return runs;
+    }
+
+    /// <summary>Square Enix PSPC pipeline cache (Final Fantasy XVI): a 192-byte header with magic "PSPC",
+    /// followed by Table 1 at offset 0xC0 containing exact 32-byte pipeline records pairing a Vertex Shader in Section 1
+    /// (offset [0x18] + 0xC0) with a Pixel Shader in Section 2 (offset [0x20] + 0xC0). Standalone compute shaders are also
+    /// emitted as single-stage pipelines.</summary>
+    public static List<List<string>>? PspcRuns(string path, IReadOnlyList<(long Off, int Size, int Kind, string Sha)> seq,
+        IReadOnlyDictionary<string, ShaderInfo> shaders, out string note)
+    {
+        note = "";
+        try
+        {
+            using var h = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var head = new byte[192];
+            if (RandomAccess.Read(h, head, 0) != 192 || !head.AsSpan(0, 4).SequenceEqual("PSPC"u8)) return null;
+
+            var count = BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(0x60));
+            if (count == 0 || count > 500_000) return null;
+
+            var sec1Base = 192L + BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(0x18));
+            var sec2Base = 192L + BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(0x20));
+
+            var shaAt = new Dictionary<long, string>();
+            foreach (var s in seq) shaAt.TryAdd(s.Off, s.Sha);
+
+            var tableBytes = new byte[count * 32];
+            if (RandomAccess.Read(h, tableBytes, 192) != tableBytes.Length) return null;
+
+            var runs = new List<List<string>>((int)count + seq.Count(s => s.Kind == 5));
+            var span = tableBytes.AsSpan();
+            for (int i = 0; i < count; i++)
+            {
+                var entry = span.Slice(i * 32, 32);
+                var u5 = BinaryPrimitives.ReadUInt32LittleEndian(entry.Slice(24, 4));
+                var u6 = BinaryPrimitives.ReadUInt32LittleEndian(entry.Slice(28, 4));
+
+                var run = new List<string>(2);
+                if (shaAt.TryGetValue(sec1Base + u5, out var vs) && shaders.ContainsKey(vs)) run.Add(vs);
+                if (shaAt.TryGetValue(sec2Base + u6, out var ps) && shaders.ContainsKey(ps)) run.Add(ps);
+                if (run.Count > 0) runs.Add(run);
+            }
+
+            // Standalone compute shaders as single-stage pipelines
+            foreach (var s in seq)
+            {
+                if (s.Kind == 5 && shaders.ContainsKey(s.Sha))
+                    runs.Add([s.Sha]);
+            }
+
+            note = $"; PSPC: {count} graphics pipelines, {runs.Count} total pipeline records";
+            return runs;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Runs of containers stored back to back (at most <see cref="MaxRecordGap"/> bytes apart; root-signature-only
