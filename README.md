@@ -1,39 +1,27 @@
 <p align="center">
   <img width="128" src=".github/assets/logo.png" alt="SCSKiller logo">
 </p>
-<h1 align="center">SCSKiller</h1>
+<h1 align="center">SCSKiller-IntelArc (Unofficial Fork)</h1>
 <p align="center">
-  <strong>Shader Compilation Stutter Killer.</strong> SCSKiller compiles your games' shaders into your GPU driver's
-  cache before you play, so the game doesn't stop to compile them mid-game. Free and open source, for Windows.
+  <strong>Shader Compilation Stutter Killer with Experimental Intel Arc Support.</strong><br>
+  Compiles your games' shaders into your GPU driver's cache before you play, so the game doesn't stop to compile them mid-game.<br>
+  Free and open source for Windows: NVIDIA, AMD, and <strong>Intel Arc (Experimental)</strong>.
 </p>
 
 <p align="center">
-  <a href="https://github.com/BlueHeisenberg/SCSKiller/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/BlueHeisenberg/SCSKiller"></a>
-  <a href="https://github.com/BlueHeisenberg/SCSKiller/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/BlueHeisenberg/SCSKiller/total"></a>
+  <a href="https://github.com/loxianne/SCSKiller-IntelArc/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/loxianne/SCSKiller-IntelArc"></a>
+  <a href="https://github.com/loxianne/SCSKiller-IntelArc/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/loxianne/SCSKiller-IntelArc/total"></a>
   <a href="LICENSE"><img alt="Licence: GPL-3.0-or-later" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue"></a>
-  <a href="https://www.patreon.com/SCSKiller"><img alt="Patreon" src="https://img.shields.io/badge/Patreon-support-f96854?logo=patreon&logoColor=white"></a>
-  <a href="https://discord.gg/st7C4yCTcN"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865f2?logo=discord&logoColor=white"></a>
 </p>
 
-<p align="center">
-  <a href="https://scskiller.com">Website</a>
-  ·
-  <a href="https://github.com/BlueHeisenberg/SCSKiller/releases/latest">Download</a>
-  ·
-  <a href="https://www.patreon.com/SCSKiller">Patreon</a>
-  ·
-  <a href="https://discord.gg/st7C4yCTcN">Discord</a>
-  ·
-  <a href="https://x.com/SCSKiller">X</a>
-  ·
-  <a href="https://github.com/BlueHeisenberg/SCSKiller/issues/new?template=bug.yml">Report a bug</a>
-  ·
-  <a href="https://github.com/BlueHeisenberg/SCSKiller/issues/new?template=game-request.yml">Request a game</a>
-</p>
+> [!NOTE]
+> Unofficial fork based on [BlueHeisenberg/SCSKiller](https://github.com/BlueHeisenberg/SCSKiller).
+> - Experimental Intel Arc GPU support: tracks DirectX 12 driver cache in `%LOCALAPPDATA%\D3DSCache` using hardware device path hashing and displays uncapped cache headroom.
+> - Merged with upstream v1.2.5.
+> - Pre-compiled portable builds: [Releases](https://github.com/loxianne/SCSKiller-IntelArc/releases).
 
 > [!WARNING]
-> The only official downloads are this repository's [Releases](https://github.com/BlueHeisenberg/SCSKiller/releases).
-> See [official links](#official-links) for the accounts and sites that belong to SCSKiller.
+> This is an unofficial fork maintained by loxianne. For official upstream releases, see [BlueHeisenberg/SCSKiller](https://github.com/BlueHeisenberg/SCSKiller).
 
 <p align="center">
   <img src=".github/assets/library.webp" alt="SCSKiller's library: games grouped by store, with shader and pipeline counts, cache size, compile time, a status such as Needs rebuilding or Warmed, and Play buttons.">
