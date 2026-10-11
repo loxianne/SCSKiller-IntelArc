@@ -11,6 +11,8 @@ const string Usage = """
     usage: scskiller <command>
       scan [--rescan]                             discover games and show their status (--rescan: redo engine detection)
       status [game]                               all games, or one in detail
+      add <exe>                                   add a game by its .exe file
+      remove <game>                               remove a manually added game
       compile <game|--all-ready> [--threads N] [--idle | --when-idle] [--careful | --fast]
                                                   --idle: background priority; --when-idle: also only while nobody uses the PC;
                                                   --careful (AMD): this and later compiles of the game compile its recorded
@@ -62,6 +64,8 @@ try
     {
         "scan" => await Scan(args.Contains("--rescan")),
         "status" => await Status(args.Length > 1 ? args[1] : null),
+        "add" => await AddGame(args.ElementAtOrDefault(1) ?? throw new ArgumentException("usage: scskiller add <exe>")),
+        "remove" => await RemoveGame(args.ElementAtOrDefault(1) ?? throw new ArgumentException("usage: scskiller remove <game>")),
         "compile" => await Compile(),
         "queue" => await QueueShell(),
         "rewarm-stale" => await RewarmStale(args.Contains("--if-driver-changed")),
@@ -558,6 +562,30 @@ int TaskCommand()
         default:
             return Fail("task register|unregister");
     }
+}
+
+async Task<int> AddGame(string exe)
+{
+    var k = await Open();
+    var folder = Opt("--folder");
+    var resolved = SCSKiller.Core.Games.ManualSource.Resolve(exe);
+    var targetFolder = folder ?? resolved.InstallDir;
+    var added = k.AddManualGame(exe, targetFolder);
+    await k.ScanAsync(CancellationToken.None);
+    var s = k.Games.FirstOrDefault(g => g.Game.Id == added.Game.Id);
+    if (s != null) Row(s);
+    else Console.WriteLine($"{added.Game.Name} ({added.Game.Id}) {(added.Existed ? "updated" : "added")}");
+    return 0;
+}
+
+async Task<int> RemoveGame(string query)
+{
+    var k = await Open();
+    var s = Match(k.Games, query);
+    if (s.Game.Store != Store.Manual) throw new ArgumentException($"{s.Game.Name} wasn't added manually (from {s.Game.Store})");
+    k.RemoveManualGame(s.Game.Id);
+    Console.WriteLine($"removed {s.Game.Name} ({s.Game.Id})");
+    return 0;
 }
 
 static int FetchCodecs(string dir)

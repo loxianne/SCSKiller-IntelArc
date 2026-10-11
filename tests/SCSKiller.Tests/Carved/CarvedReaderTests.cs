@@ -225,4 +225,37 @@ public class CarvedReaderTests
         Assert.Throws<OperationCanceledException>(() => new CarvedReader().Index(game, engine, null, new CancellationToken(true)));
         Directory.Delete(dir, true);
     }
+
+    [Fact]
+    public void PspcFilesAreCarvedAndPacFilesIgnored()
+    {
+        var dir = Ff7.TempDir("carved-pspc");
+        try
+        {
+            var pspc = new MemoryStream();
+            for (var i = 0; i < Pairs; i++)
+            {
+                pspc.Write(Hlsl.Vs(i + 1, Hlsl.Rs1));
+                pspc.Write(Hlsl.Ps(i + 1, Hlsl.Rs1));
+            }
+            File.WriteAllBytes(Path.Combine(dir, "ffxvi.pspc"), pspc.ToArray());
+            File.WriteAllBytes(Path.Combine(dir, "data.pac"), new byte[1024]);
+            File.WriteAllBytes(Path.Combine(dir, "game.exe"), new byte[1024]);
+
+            var game = new Game("test:pspc", "pspc", Store.Other, dir, Path.Combine(dir, "game.exe"));
+            var reader = new CarvedReader();
+            var engine = reader.Detect(game);
+            Assert.NotNull(engine);
+            Assert.Equal(CarvedReader.Family, engine.Family);
+            Assert.Equal("DXBC+RTS0", engine.Version);
+            Assert.Null(engine.Unsupported);
+
+            var index = reader.Index(game, engine, null, CancellationToken.None);
+            Assert.Equal(2 * Pairs, index.Shaders.Count);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
 }

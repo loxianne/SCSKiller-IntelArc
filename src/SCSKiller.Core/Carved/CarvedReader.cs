@@ -220,7 +220,7 @@ public sealed class CarvedReader : IEngineReader
     static readonly HashSet<string> NotShaders = new(StringComparer.OrdinalIgnoreCase)
     {
         ".exe", ".dll", ".pdb", ".bk2", ".bik", ".usm", ".mp4", ".webm", ".wem", ".bnk", ".ogg", ".wav", ".mp3", ".fsb", ".xwm", ".awc",
-        ".mkv", ".avi", ".wmv", ".flac", ".opus", ".png", ".jpg", ".dds", ".ttf", ".otf",
+        ".mkv", ".avi", ".wmv", ".flac", ".opus", ".png", ".jpg", ".dds", ".ttf", ".otf", ".pac",
     };
 
     /// <summary>Shader/PSO-named files (the speed hint: every carver game measured names its shader files so), then the
@@ -230,7 +230,8 @@ public sealed class CarvedReader : IEngineReader
         var opts = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MaxRecursionDepth = 8 };
         var all = new DirectoryInfo(dir).EnumerateFiles("*", opts).Where(f => f.Length >= 64 && !NotShaders.Contains(f.Extension)).ToList();
         bool Named(FileInfo f) => Path.GetRelativePath(dir, f.FullName) is var rel
-            && (rel.Contains("shader", StringComparison.OrdinalIgnoreCase) || rel.Contains("pso", StringComparison.OrdinalIgnoreCase));
+            && (rel.Contains("shader", StringComparison.OrdinalIgnoreCase) || rel.Contains("pso", StringComparison.OrdinalIgnoreCase)
+                || rel.Contains("pspc", StringComparison.OrdinalIgnoreCase));
         return (all.Where(Named).OrderBy(f => f.FullName, StringComparer.OrdinalIgnoreCase).ToList(),
             all.Where(f => !Named(f) && f.Length >= 64 << 10).OrderBy(f => f.Length).ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase).ToList());
     }
