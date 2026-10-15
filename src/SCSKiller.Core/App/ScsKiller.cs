@@ -4510,6 +4510,7 @@ public sealed partial class ScsKiller : IScsKiller
                 var (items, seconds) = (rec.ResumeItems + result.Done - options.StartAt, rec.ResumeSeconds + result.Elapsed.TotalSeconds);
                 if (yielded && result.Outcome == WarmOutcome.Stopped && !ct.IsCancellationRequested)
                 {
+                    PromoteIntelCache(rec, game, cacheKeys, work, started);
                     (rec.ResumeAt, rec.ResumeItems, rec.ResumeSeconds, rec.ResumeFailed, rec.ResumeGpu, rec.ResumeLayer) = (result.Done, items, seconds, result.Failed, driverId, layer?.Fingerprint);
                     Store.SaveGame(id, rec);
                     continue;
@@ -4525,16 +4526,7 @@ public sealed partial class ScsKiller : IScsKiller
                         rec.WarmedLayer = layer?.Fingerprint;
                         (rec.WarmedAt, rec.LastWarmTime, rec.LastCacheGrowthBytes) = (DateTimeOffset.Now, TimeSpan.FromSeconds(seconds), result.CacheGrowthBytes);
                         (rec.LastWarmFailed, rec.LastWarmSkipped, rec.LastWarmNeedsRecording, rec.WarmedKeys) = (result.Failed, result.Skipped, needsRecording, [.. cacheKeys]);
-                        if (AppCache is IntelAppCache intel)
-                        {
-                            var targetKey = rec.GameKeys.FirstOrDefault(k => k.StartsWith(IntelAppCache.D3dsPrefix, StringComparison.OrdinalIgnoreCase))
-                                ?? (D3DSCache.FoldersOf(intel.D3dsDir, game).FirstOrDefault() is { } folder ? $"{IntelAppCache.D3dsPrefix}{Path.GetFileName(folder)}" : null)
-                                ?? $"{IntelAppCache.D3dsPrefix}{IntelAppCache.D3dsPathHash(game.ExePath)}";
-                            intel.PromoteWarm(targetKey, cacheKeys, game.ExePath);
-                            rec.GameKeys.Add(targetKey);
-                            rec.CacheKeys.Add(targetKey);
-                            rec.WarmedKeys = [targetKey];
-                        }
+                        PromoteIntelCache(rec, game, cacheKeys, work, started);
                         rec.WarmedFiles = AppCache is AmdAppCache amd ? amd.D3D12FileNames(cacheKeys) : null;
                         rec.LastWarmCrashed = crashed;
                         // what the recorder's csv counts as known from now on; the next refresh (this compile's closing one)
@@ -4566,6 +4558,7 @@ public sealed partial class ScsKiller : IScsKiller
                         Stage(QueueStage.Done);
                         break;
                     case WarmOutcome.Stopped:
+                        PromoteIntelCache(rec, game, cacheKeys, work, started);
                         (rec.ResumeAt, rec.ResumeItems, rec.ResumeSeconds, rec.ResumeFailed, rec.ResumeGpu, rec.ResumeLayer) = (result.Done, items, seconds, result.Failed, driverId, layer?.Fingerprint);
                         Store.SaveGame(id, rec);
                         Stage(QueueStage.Stopped);
@@ -4608,6 +4601,25 @@ public sealed partial class ScsKiller : IScsKiller
                     try { ReconcileRecorders(id); }
                     catch (Exception e) { Log?.Report($"{game.Name}: reconciling the recorder failed: {e.Message}"); }
             }
+        }
+    }
+
+    private void PromoteIntelCache(GameRecord rec, Game game, IEnumerable<string> cacheKeys, string workDir, DateTime started)
+    {
+        if (AppCache is IntelAppCache intel)
+        {
+            var targetKey = rec.GameKeys.FirstOrDefault(k => k.StartsWith(IntelAppCache.D3dsPrefix, StringComparison.OrdinalIgnoreCase))
+                ?? (D3DSCache.FoldersOf(intel.D3dsDir, game).FirstOrDefault() is { } folder ? $"{IntelAppCache.D3dsPrefix}{Path.GetFileName(folder)}" : null)
+                ?? $"{IntelAppCache.D3dsPrefix}{IntelAppCache.D3dsPathHash(game.ExePath)}";
+            var keys = new HashSet<string>(cacheKeys, StringComparer.OrdinalIgnoreCase);
+            foreach (var d in D3DSCache.Made(intel.D3dsDir, workDir, started))
+            {
+                keys.Add($"{IntelAppCache.D3dsPrefix}{Path.GetFileName(d)}");
+            }
+            intel.PromoteWarm(targetKey, keys, game.ExePath);
+            rec.GameKeys.Add(targetKey);
+            rec.CacheKeys.Add(targetKey);
+            rec.WarmedKeys = [targetKey];
         }
     }
 

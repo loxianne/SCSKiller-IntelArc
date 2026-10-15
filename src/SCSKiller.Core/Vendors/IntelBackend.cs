@@ -17,8 +17,12 @@ public sealed class IntelBackend : IGpuVendorBackend, IRefreshableGpu
         RtCacheGranularity: RtCacheGranularity.WholeObject);
 
     static string LocalAppData => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    static string UserProfile => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     public static string D3DSCacheDir => Path.Combine(LocalAppData, "D3DSCache");
-    public static string IntelShaderCacheDir => Path.Combine(LocalAppData, "Intel", "ShaderCache");
+    public static string IntelShaderCacheDir =>
+        Directory.Exists(Path.Combine(UserProfile, "AppData", "LocalLow", "Intel", "ShaderCache"))
+            ? Path.Combine(UserProfile, "AppData", "LocalLow", "Intel", "ShaderCache")
+            : Path.Combine(LocalAppData, "Intel", "ShaderCache");
 
     public IntelAppCache AppCache { get; }
     IAppCache? IGpuVendorBackend.AppCache => AppCache;
