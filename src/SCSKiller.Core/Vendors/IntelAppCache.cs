@@ -63,6 +63,20 @@ public sealed class IntelAppCache(string d3dsDir, string intelDir) : IAppCache
 
     public long SizeOf(IEnumerable<string> keys) => FilesOf(keys).Sum(f => f.Length);
 
+    /// <summary>Returns the size in bytes of the largest shader cache container file in the IntelShaderCache directory.</summary>
+    public long LargestContainerBytes()
+    {
+        if (!Directory.Exists(IntelDir)) return 0;
+        try
+        {
+            return new DirectoryInfo(IntelDir).EnumerateFiles("*", SearchOption.AllDirectories)
+                .Select(f => f.Length)
+                .DefaultIfEmpty(0)
+                .Max();
+        }
+        catch { return 0; }
+    }
+
     public IReadOnlySet<string> KeysOpenBy(string exeFileName)
     {
         var candidates = new List<(string Path, string Key)>();

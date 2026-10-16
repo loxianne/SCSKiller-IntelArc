@@ -13,11 +13,12 @@ const string Usage = """
       status [game]                               all games, or one in detail
       add <exe>                                   add a game by its .exe file
       remove <game>                               remove a manually added game
-      compile <game|--all-ready> [--threads N] [--idle | --when-idle] [--careful | --fast]
+      compile <game|--all-ready> [--threads N] [--idle | --when-idle] [--careful | --fast] [--recorded-only]
                                                   --idle: background priority; --when-idle: also only while nobody uses the PC;
-                                                  --careful (AMD): this and later compiles of the game compile its recorded
+                                                  --careful (AMD/Intel): this and later compiles of the game compile its recorded
                                                   pipelines in passes on few threads, so the driver keeps more of them (slower);
-                                                  --fast: back to one pass
+                                                  --fast: back to one pass;
+                                                  --recorded-only: compile strictly recorded shaders without speculative permutations
       queue [command]                             debug shell for the compile queue: the command, then one per line on stdin:
                                                   list | add <game> | move <game> <index> | remove <game> | start | stop | wait | quit
       rewarm-stale [--if-driver-changed]          what the scheduled task runs; follows the driver-update setting
@@ -211,7 +212,7 @@ async Task<int> Status(string? query)
     return 0;
 }
 
-static string CarefulLine(CarefulCompile? c) => c is not { } x ? "- (AMD only)"
+static string CarefulLine(CarefulCompile? c) => c is not { } x ? "- (AMD and Intel only)"
     : (x.On ? $"on: the recorded pipelines compile in passes on at most {ScsKiller.AmdCarefulThreads} threads, the rest at full speed" : "off (compile <game> --careful turns it on)")
       + (x.Recorded == 0 ? "; no recording yet, so nothing compiles carefully" : x.Estimate is { } t ? $"; a careful compile takes about {ScsKiller.Duration(t)}" : "");
 
@@ -323,11 +324,12 @@ async Task<int> CacheClear()
 
 async Task<int> Compile()
 {
-    if (args.Length < 2) return Fail("compile <game|--all-ready> [--threads N] [--idle | --when-idle] [--careful | --fast]");
-    Only("--all-ready", "--threads", "--idle", "--when-idle", "--careful", "--fast");
+    if (args.Length < 2) return Fail("compile <game|--all-ready> [--threads N] [--idle | --when-idle] [--careful | --fast] [--recorded-only]");
+    Only("--all-ready", "--threads", "--idle", "--when-idle", "--careful", "--fast", "--recorded-only");
     int? threads = Opt("--threads") is { } t ? int.TryParse(t, out var n) && n > 0 ? n : throw new ArgumentException("--threads takes a number of threads") : null;
     var k = await Open();
     if (threads != null) k.ThreadsOverride = threads;
+    if (args.Contains("--recorded-only")) k.RecordedOnlyOverride = true;
     bool whenIdle = args.Contains("--when-idle");
     k.Background = args.Contains("--idle");
     if (k.Background || whenIdle) BackgroundPriority();

@@ -57,8 +57,18 @@ static class Fmt
     public static string Cache(GameState s) => s.CacheOnDisk is { } c ? Format.Bytes(c) : s.EstimatedCacheBytes is { } b ? "≈ " + Format.Bytes(b) : Format.Dash;
     /// <summary>The last compile's measured time, else the estimate: the estimate's rate is measured on a cold cache only.</summary>
     public static TimeSpan? CompileTime(GameState s) => s.LastWarmTime ?? s.EstimatedWarmTime;
-    /// <summary>Tooltip for an estimated (not measured) cache value; null when measured.</summary>
-    public static string? CacheTip(GameState s) => s.CacheOnDisk == null && s.EstimatedCacheBytes != null ? "Estimated driver cache if compiled" : null;
+    /// <summary>Tooltip for an estimated cache value, or Intel container limit info when measured.</summary>
+    public static string? CacheTip(GameState s)
+    {
+        if (App.Core?.Vendor?.Vendor == GpuVendor.Intel && s.CacheOnDisk is { } c)
+        {
+            long limit = IntelBackend.ContainerCeilingBytes;
+            double pct = 100.0 * c / limit;
+            long free = Math.Max(0, limit - c);
+            return $"{Format.Bytes(c)} of {Format.Bytes(limit)} Intel container limit ({pct:0.0}% used · {Format.Bytes(free)} free)";
+        }
+        return s.CacheOnDisk == null && s.EstimatedCacheBytes != null ? "Estimated driver cache if compiled" : null;
+    }
     /// <summary>One middleware tag: what it compiles and its DLLs.</summary>
     public static string TagTip(MiddlewareTag t) => Format.Middleware(t) + "\n    " + string.Join(", ", t.Dlls);
     public static bool Active(QueueItem q) => q.Stage is not (QueueStage.Done or QueueStage.Failed or QueueStage.Stopped);
@@ -262,7 +272,7 @@ public sealed class GameRow(GameState s, bool queued = false, bool compiling = f
     public string Pipelines => Fmt.N(ScsKiller.PlanPipelines(s));
     public string Cache => Fmt.Cache(s);
     public string? CacheTip => Fmt.CacheTip(s);
-    public Style CacheStyle => Fmt.Style(CacheTip != null ? "Secondary" : "BodyTextBlockStyle");
+    public Style CacheStyle => Fmt.Style(s.CacheOnDisk == null && s.EstimatedCacheBytes != null ? "Secondary" : "BodyTextBlockStyle");
     public string Time => Format.Duration(Fmt.CompileTime(s));
 
     bool Partly => ScsKiller.IsPartlyWarmed(s);
@@ -353,7 +363,7 @@ public sealed class LibraryVm : Bindable
     static bool scanned;
     readonly BackgroundRead<(CacheUsage Usage, CacheLimit? Limit, long? Capped)> cache;
 
-    public LibraryVm() => cache = new(() => (App.Core.Vendor.GetCacheUsage(), App.Core.Vendor.GetCacheLimit(), (App.Core.Vendor as AmdBackend)?.AppCache.DxcBytes()), ShowCache);
+    public LibraryVm() => cache = new(() => (App.Core.Vendor.GetCacheUsage(), App.Core.Vendor.GetCacheLimit(), (App.Core.Vendor as AmdBackend)?.AppCache.DxcBytes() ?? (App.Core.Vendor as IntelBackend)?.LargestContainerBytes()), ShowCache);
 
     public ObservableCollection<GameRow> Games { get; } = [];   // every game, sorted; the list shows Groups
     /// <summary>The list: rows matching <see cref="Filter"/> per store, empty stores left out. Filtering reuses the rows
@@ -515,15 +525,21 @@ public sealed class LibraryVm : Bindable
         foreach (var (store, rows) in groups) Groups.Add(new StoreGroup(store, rows));
     }
 
-    // Capped: AMD's limit is of its DirectX 12 cache alone, which the usage counts with the DirectX 11 one
+    // Capped: AMD's limit is of its DirectX 12 cache alone; Intel's is the INSC container ceiling
     void ShowCache((CacheUsage Usage, CacheLimit? Limit, long? Capped) c)
     {
         var (usage, limit, capped) = c;
+        var intel = App.Core.Vendor.Vendor == GpuVendor.Intel;
         CacheUsed = (usage.UpperBound ? "≤ " : "") + Format.Bytes(usage.BytesOnDisk);
-        CacheLimitText = limit is null ? "limit unknown" : limit.Bytes is { } lb ? capped is { } cb ? $"· DirectX 12 {Format.Bytes(cb)} of {Format.Bytes(lb)} limit" : $"of {Format.Bytes(lb)} limit" : "no limit";
+        CacheLimitText = limit is null ? "limit unknown"
+            : intel && limit.Bytes is { } ilb && capped is { } icb
+                ? $"· {Format.Bytes(ilb)} limit per game (largest: {Format.Bytes(icb)})"
+            : limit.Bytes is { } lb ? capped is { } cb ? $"· DirectX 12 {Format.Bytes(cb)} of {Format.Bytes(lb)} limit" : $"of {Format.Bytes(lb)} limit" : "no limit";
         CachePercent = limit?.Bytes is { } max && max > 0 ? Math.Min(100, 100.0 * (capped ?? usage.BytesOnDisk) / max) : 0;
         CacheWarn = limit?.Bytes is not null && (limit.IsDriverDefault || CachePercent > 75);
-        CacheWarnText = limit?.IsDriverDefault == true ? "Driver default limit may evict games" : "The cache is nearly full";
+        CacheWarnText = intel && CachePercent >= 90 ? "A game container is near its 512 MB ceiling (>90%) — risk of driver LRU stalls"
+            : intel && CachePercent > 75 ? "A game container is nearing its 512 MB limit (>75%)"
+            : limit?.IsDriverDefault == true ? "Driver default limit may evict games" : "The cache is nearly full";
         Changed();
     }
 
@@ -641,7 +657,7 @@ public sealed class DetailVm(string id) : Bindable
     public bool CarefulOn => CarefulPending ?? s.Careful?.On == true;
     public bool CanToggleCareful => CarefulPending == null && !Queued;
     public string CarefulNote => (s.Careful is { Recorded: 0 } ? "Compiles the pipelines recorded in the game in passes on few threads, so the driver keeps more of them. This game has no recording yet, so there is nothing to compile carefully."
-        : $"Compiles the pipelines recorded in the game in passes on {ScsKiller.AmdCarefulThreads} threads, so the driver keeps more of them; the rest at full speed."
+        : $"Compiles the pipelines recorded in the game in passes on {ScsKiller.CarefulThreads(App.Core.Vendor.Vendor) ?? ScsKiller.AmdCarefulThreads} threads, so the driver keeps more of them; the rest at full speed."
           + (s.Careful?.Estimate is { } est ? $" About {Format.Duration(est)}" + (s.Careful.On || Fmt.CompileTime(s) is not { } fast ? "." : $" instead of {Format.Duration(fast)}.") : ""))
         + (s.Careful?.LaunchCompiled is { } lc ? $" After the last compile, the game's first launch still compiled {lc * 100:0}% of its pipelines." : "");
     // Windows' shader cache of the game, read off the UI thread: Clear cache clears it too, so it can be the only cache to clear.
@@ -805,9 +821,25 @@ public sealed class DetailVm(string id) : Bindable
     public string TimeLabel => s.LastWarmTime != null ? "Compile time" : "Compile time (estimate)";
     public string TimeValue => s.LastWarmTime is { TotalMinutes: >= 1, TotalHours: < 1 } t ? $"{t.Minutes} min {t.Seconds} s"   // measured: to the second
         : Format.Duration(Fmt.CompileTime(s));
+    public bool IsIntelGpu => App.Core?.Vendor?.Vendor == GpuVendor.Intel;
+    public double IntelContainerPercent => IsIntelGpu && s.CacheOnDisk is { } c
+        ? Math.Min(100.0, 100.0 * c / IntelBackend.ContainerCeilingBytes) : 0;
     public bool HasDiskValue => s.CacheOnDisk != null || s.EstimatedCacheBytes != null;
-    public string DiskLabel => s.CacheOnDisk != null ? "Disk space" : "Disk space (estimate)";
-    public string DiskValue => Format.Bytes(s.CacheOnDisk ?? s.EstimatedCacheBytes);
+    public string DiskLabel => IsIntelGpu
+        ? (s.CacheOnDisk != null ? "Intel container (512 MB limit)" : "Intel container (estimate)")
+        : (s.CacheOnDisk != null ? "Disk space" : "Disk space (estimate)");
+    public string DiskValue
+    {
+        get
+        {
+            if (IsIntelGpu && s.CacheOnDisk is { } c)
+            {
+                double pct = 100.0 * c / IntelBackend.ContainerCeilingBytes;
+                return $"{Format.Bytes(c)} of 512 MB ({pct:0.0}%)";
+            }
+            return Format.Bytes(s.CacheOnDisk ?? s.EstimatedCacheBytes);
+        }
+    }
     public bool HasShaderCount => s.ShaderCount != null;
     public string ShaderCount => Fmt.N(s.ShaderCount);
     // measured frames when the recorder timed them, else the compile count
@@ -839,6 +871,7 @@ public sealed class DetailVm(string id) : Bindable
         P is { } u && u.ExactUnits + u.InferredUnits + u.GuessedUnits > 0 ? new("Stage units exact / inferred / guessed", $"{u.ExactUnits:N0} / {u.InferredUnits:N0} / {u.GuessedUnits:N0}") : null,
         P is { LayoutCoverage: > 0 } ? new("Vertex layouts from a recording", $"{P.LayoutCoverage:P1}") : null,
         s.CacheOnDisk != null || s.EstimatedCacheBytes != null ? new("Driver cache", Fmt.Cache(s) + (s.CacheOnDisk != null ? " measured" : " estimated")) : null,
+        IsIntelGpu && s.CacheOnDisk is { } ic ? new("Intel container ceiling", $"{Format.Bytes(ic)} of 512 MB limit ({Format.Bytes(Math.Max(0, IntelBackend.ContainerCeilingBytes - ic))} free)") : null,
     }.OfType<DetailRow>().ToList();
 
 
@@ -1055,7 +1088,7 @@ public sealed class QueueVm : Bindable
     (CacheUsage Usage, CacheLimit? Limit, long? Capped)? driver;
     readonly BackgroundRead<(CacheUsage, CacheLimit?, long?)> cache;
 
-    public QueueVm() => cache = new(() => (App.Core.Vendor.GetCacheUsage(), App.Core.Vendor.GetCacheLimit(), (App.Core.Vendor as AmdBackend)?.AppCache.DxcBytes()),
+    public QueueVm() => cache = new(() => (App.Core.Vendor.GetCacheUsage(), App.Core.Vendor.GetCacheLimit(), (App.Core.Vendor as AmdBackend)?.AppCache.DxcBytes() ?? (App.Core.Vendor as IntelBackend)?.LargestContainerBytes()),
         c => { driver = c; ShowCache(); Changed(); });
     Settings S { get => App.Core.Settings; set { App.Core.Settings = value; Changed(); } }
 
@@ -1148,7 +1181,7 @@ public sealed class QueueVm : Bindable
     {
         if (driver is not { } d) return;   // not read yet
         CacheWarnText = (d.Capped is { } used
-            ? ScsKiller.LargeCompileWarning(sizes, App.Core.Vendor.Vendor) ?? AmdAppCache.QueueWarning(used, growth)   // one game over the cap is always over what's free too
+            ? ScsKiller.LargeCompileWarning(sizes, App.Core.Vendor.Vendor) ?? (App.Core.Vendor.Vendor == GpuVendor.Amd ? AmdAppCache.QueueWarning(used, growth) : ScsKiller.QueueCacheWarning(sizes, used, planned, d.Limit?.Bytes, App.Core.Vendor.Vendor))
             : ScsKiller.QueueCacheWarning(sizes, d.Usage.BytesOnDisk, planned, d.Limit?.Bytes, App.Core.Vendor.Vendor)) ?? "";
         CacheWarn = CacheWarnText.Length > 0;
     }

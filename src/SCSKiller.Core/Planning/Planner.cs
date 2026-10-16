@@ -1,4 +1,4 @@
-﻿using System.IO.Compression;
+using System.IO.Compression;
 using System.Numerics;
 using System.Text.Json;
 using SCSKiller.Core.Carved;
@@ -116,9 +116,9 @@ public sealed class Planner(string? packDir = null, string? sharedPackDir = null
     }
 
     public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir,
-        IProgress<string>? log, CancellationToken ct, bool maximum = false)
+        IProgress<string>? log, CancellationToken ct, bool maximum = false, bool recordedOnly = false)
     {
-        var builder = new PlanBuilder(game, engine, index, recording, caps, outDir, log, ct, maximum, Packs, SharedPacks);
+        var builder = new PlanBuilder(game, engine, index, recording, caps, outDir, log, ct, maximum, Packs, SharedPacks, recordedOnly);
         var plan = builder.Build();
         if (builder.PackFingerprint is { } f) seeded.AddOrUpdate(plan, f);
         return plan;

@@ -68,7 +68,12 @@ public sealed class IntelBackend : IGpuVendorBackend, IRefreshableGpu
         return new CacheUsage(D3DSCacheDir, bytes, UpperBound: false);
     }
 
-    public CacheLimit? GetCacheLimit() => new(Bytes: null, IsDriverDefault: false);
+    /// <summary>Intel graphics driver's internal shader cache container ceiling (~512 MiB per container).</summary>
+    public const long ContainerCeilingBytes = 512L * 1024 * 1024;
+
+    public long LargestContainerBytes() => AppCache.LargestContainerBytes();
+
+    public CacheLimit? GetCacheLimit() => new(Bytes: ContainerCeilingBytes, IsDriverDefault: false);
 
     public void SetCacheLimit(CacheLimit limit) =>
         throw new NotSupportedException($"the Intel shader cache size is not configurable ({Gpu.Name})");

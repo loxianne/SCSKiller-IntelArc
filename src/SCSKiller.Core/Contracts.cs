@@ -1,4 +1,4 @@
-﻿// Shared contracts; numbering and semantics are documented in ARCHITECTURE.md.
+// Shared contracts; numbering and semantics are documented in ARCHITECTURE.md.
 namespace SCSKiller.Core;
 
 public enum Store { Steam, Epic, Xbox, Other, EA, Manual }   // Manual: added by the user (ManualSource)
@@ -183,7 +183,7 @@ public interface IPlanner
     /// once; maximum also emits every stage set whose units are already covered (every pairing pre-linked), with the same
     /// per-unit state. Without one, plans are whole pipelines either way.</param>
     Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir,
-        IProgress<string>? log, CancellationToken ct, bool maximum = false);
+        IProgress<string>? log, CancellationToken ct, bool maximum = false, bool recordedOnly = false);
     /// <summary>Writes a warm-ready work folder: scskiller.db (the recording, or empty) + scskiller_gen.db
     /// (shader bytes pulled from the game through <paramref name="reader"/>, templates, root signatures, plan items).</summary>
     void Materialize(Plan plan, Game game, EngineInfo engine, IEngineReader reader, Recording? recording, string workDir, CancellationToken ct);

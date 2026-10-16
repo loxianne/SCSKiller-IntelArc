@@ -587,6 +587,8 @@ public static class NativeTools
         {
             var p = Path.Combine(d.FullName, "proxy", "build", "Release", fileName);
             if (File.Exists(p)) return p;
+            var dist = Path.Combine(d.FullName, "dist", "SCSKiller", "current", "native", fileName);
+            if (File.Exists(dist)) return dist;
         }
         return null;
     }

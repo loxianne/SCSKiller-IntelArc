@@ -16,7 +16,7 @@ sealed class PlanBuilder
     readonly string outDir;
     readonly IProgress<string>? log;
     readonly CancellationToken ct;
-    readonly bool maximum;
+    readonly bool maximum, recordedOnly;
     readonly MiddlewarePacks? packs, sharedPacks;
 
     readonly IReadOnlyDictionary<string, ShaderInfo> bc;
@@ -70,10 +70,10 @@ sealed class PlanBuilder
     /// <param name="maximum">with a per-stage cache: also every stage set whose units the cover already has, on its first
     /// resolved state (every pre-linked pair, as a whole-pipeline plan has them); the units stay the same</param>
     public PlanBuilder(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir,
-        IProgress<string>? log, CancellationToken ct, bool maximum = false, MiddlewarePacks? packs = null, MiddlewarePacks? sharedPacks = null)
+        IProgress<string>? log, CancellationToken ct, bool maximum = false, MiddlewarePacks? packs = null, MiddlewarePacks? sharedPacks = null, bool recordedOnly = false)
     {
-        (this.game, this.engine, this.index, this.recording, this.caps, this.outDir, this.log, this.ct, this.maximum, this.packs, this.sharedPacks) =
-            (game, engine, index, recording, caps, outDir, log, ct, maximum, packs, sharedPacks);
+        (this.game, this.engine, this.index, this.recording, this.caps, this.outDir, this.log, this.ct, this.maximum, this.packs, this.sharedPacks, this.recordedOnly) =
+            (game, engine, index, recording, caps, outDir, log, ct, maximum, packs, sharedPacks, recordedOnly);
         bc = index.Shaders;
         maps = index.Maps.Select(m => (m.Platform, Pooled: false, Shas: m.Shaders, m.IsPipeline)).ToList();
         maps.AddRange(index.Maps.Where(m => m.Library == "Global").GroupBy(m => m.Platform)
@@ -88,9 +88,14 @@ sealed class PlanBuilder
         ReadRecording();
         Decide();
         if (dx12) RuntimeBuilt();
-        if (dx12 && UnitPolicy.For(caps) is { } policy) PerStage(policy);
+        bool useRecordedOnly = recordedOnly || (caps.Profile.StartsWith("intel") && recs.Count > 0 && !maximum);
+        if (useRecordedOnly)
+        {
+            log?.Report($"plan: recorded-only mode active: compiling {recs.Count} in-game recorded pipelines, skipping speculative permutations");
+        }
+        else if (dx12 && UnitPolicy.For(caps) is { } policy) PerStage(policy);
         else StageSets(Emit);
-        if (dx12 && Planner.RtCollectionCache(caps))
+        if (dx12 && !useRecordedOnly && Planner.RtCollectionCache(caps))
             try { RtPlan(); }
             catch (RootSig.SerializeException e)   // the rule's global root signature: no collections, the PSOs still plan
             {
@@ -386,6 +391,11 @@ sealed class PlanBuilder
 
     void Count(string k) => stats[k] = stats.GetValueOrDefault(k) + 1;
 
+    /// <summary>Intel driver shader cache container (~512 MB hard ceiling in INSC) safety threshold.
+    /// Speculative combinatorial permutations are capped to keep the cache container well below 300 MB,
+    /// preventing driver-level LRU thrashing and lookup contention while preserving 100% of recorded in-game pipelines.</summary>
+    public const int IntelMaxSpeculativePsos = 35_000;
+
     /// <summary>One stage set as whole-pipeline PSOs: a recorded template of its shape with the shaders swapped (every GS
     /// template of the GS's input topology), else a synthesized one.</summary>
     void Emit(SortedDictionary<int, string> stages, string shape, string psOut)
@@ -401,6 +411,11 @@ sealed class PlanBuilder
         if (rs == null || (cands == null && (!synth || topo == 0))) { Count(rs == null ? NoRs : gs != null ? "no_gs_template" : "no_template"); return; }
         if (!Covers(rs, stages)) { Count("rs_uncovered"); return; }
         if (have.Contains(Tuple(rs, stages))) { Count("already_recorded"); return; }
+        if (caps.Profile.StartsWith("intel") && items.Count + synthesized.Count >= IntelMaxSpeculativePsos)
+        {
+            Count("intel_cap_skipped");
+            return;
+        }
         usedRs.Add(rs);
         Count("generated");
         if (gs != null && cands != null)
@@ -987,6 +1002,7 @@ sealed class PlanBuilder
     (List<Rec> Synthesized, List<byte[]> Items) SettingsVariants()
     {
         if (!build || samplers is not { Length: > 0 } primary) return ([], []);
+        if (caps.Profile.StartsWith("intel") && items.Count + synthesized.Count >= IntelMaxSpeculativePsos) return ([], []);
         var others = SamplerVariants.OtherSettings(new HashSet<string> { Convert.ToHexStringLower(primary) }, settings.Values).Select(h => samplerSets[h]).ToList();
         if (others.Count == 0) return ([], []);
         List<Rec> synth = [];
@@ -1078,7 +1094,7 @@ sealed class PlanBuilder
             new PlanStats(pipelines + replayable.Count, items.Count + synthesized.Count + rtItems.Count + hitGroupItems.Count, synthesized.Count, usedRs.Count, dx12 && (verified || embeddedRs > 0),
                 unitsBy[(int)Provenance.Exact], unitsBy[(int)Provenance.Inferred], unitsBy[(int)Provenance.Guessed], layoutCoverage, n11, packNew,
                 stats.GetValueOrDefault("rs_uncovered"), rtLibs - rtUnbuilt, inlineOnly || engine.NoRtPipelines ? 0 : rtLibs - rtCovered - rtUnbuilt,
-                StageSets: seen.Count + unpaired - stats.GetValueOrDefault("rs_unserializable"), LeftOut: new[] { "no_rs", "no_template", "no_gs_template", "rs_uncovered", "stream_output" }.Sum(stats.GetValueOrDefault),
+                StageSets: seen.Count + unpaired - stats.GetValueOrDefault("rs_unserializable"), LeftOut: new[] { "no_rs", "no_template", "no_gs_template", "rs_uncovered", "stream_output", "intel_cap_skipped" }.Sum(stats.GetValueOrDefault),
                 MiddlewareSharedItems: packShared, RtStateObjects: replayable.Count, RtInline: rtInline, Variants: synthCopies.Count + itemCopies.Count + replays.Count - pipelines),
             Path.Combine(outDir, "plan.bin"));
         PlanFile.Write(plan, body);

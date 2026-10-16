@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Security.Cryptography;
@@ -6925,9 +6925,10 @@ public partial class AppTests : IDisposable
     [InlineData(GpuVendor.Amd, true, 20, 8, ScsKiller.AmdCarefulThreads, ScsKiller.AmdCarefulThreads, 2)]
     [InlineData(GpuVendor.Amd, true, 1, 8, 1, ScsKiller.AmdCarefulThreads, 2)]   // fewer threads asked: fewer
     [InlineData(GpuVendor.Amd, false, 20, 3, 0, 0, 0)]
+    [InlineData(GpuVendor.Intel, true, 20, 8, ScsKiller.IntelCarefulThreads, ScsKiller.IntelCarefulThreads, 2)]
     [InlineData(GpuVendor.Nvidia, true, 20, 3, 0, 0, 0)]    // a careful choice kept from an AMD GPU: ignored
     [InlineData(GpuVendor.Unknown, true, 20, 3, 0, 0, 0)]
-    public async Task The_careful_thread_cap_and_passes_apply_on_AMD_only(GpuVendor vendor, bool careful, int threads, int background,
+    public async Task The_careful_thread_cap_and_passes_apply_on_AMD_and_Intel(GpuVendor vendor, bool careful, int threads, int background,
         int foregroundCareful, int backgroundCareful, int passes)
     {
         foreach (var (idle, full, capped) in new[] { (false, threads, foregroundCareful), (true, background, backgroundCareful) })
@@ -6940,12 +6941,13 @@ public partial class AppTests : IDisposable
             rec.Careful = careful;
             k.Store.SaveGame(_game.Id, rec);
             await k.ScanAsync(default);
-            Assert.Equal(vendor == GpuVendor.Amd, k.Games.Single().Careful != null);
+            bool supported = vendor is GpuVendor.Amd or GpuVendor.Intel;
+            Assert.Equal(supported, k.Games.Single().Careful != null);
             k.Enqueue(_game.Id);
             k.StartQueue();
             await k.WhenQueueIdle().WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Equal((full, capped, passes), (warmer.Options!.Threads, warmer.Options.CarefulThreads, warmer.Passes));   // the fast items keep every thread
-            if (vendor != GpuVendor.Amd) Assert.Throws<InvalidOperationException>(() => k.SetCarefulCompile(_game.Id, true));
+            if (!supported) Assert.Throws<InvalidOperationException>(() => k.SetCarefulCompile(_game.Id, true));
         }
     }
     ScsKiller CaseKiller(GpuVendor vendor, FakeWarmer warmer) =>
@@ -10609,8 +10611,8 @@ public partial class AppTests : IDisposable
             _ when recorded && recording == null => new(Readiness.NeedsRecording, "needs a recording"),
             _ => _inner.Check(game, engine, recording, caps),
         };
-        public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir, IProgress<string>? log, CancellationToken ct, bool maximum = false) =>
-            _inner.Build(game, engine, index, recording, caps, outDir, log, ct, maximum);
+        public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir, IProgress<string>? log, CancellationToken ct, bool maximum = false, bool recordedOnly = false) =>
+            _inner.Build(game, engine, index, recording, caps, outDir, log, ct, maximum, recordedOnly);
         public void Materialize(Plan plan, Game game, EngineInfo engine, IEngineReader reader, Recording? recording, string workDir, CancellationToken ct) =>
             _inner.Materialize(plan, game, engine, reader, recording, workDir, ct);
     }
@@ -12990,10 +12992,10 @@ public partial class AppTests : IDisposable
         public List<string>? BuiltWith;
         public PlanCheck Check(Game game, EngineInfo engine, Recording? recording, VendorCaps caps) =>
             recording == null ? new(Readiness.NeedsRecording, "needs one short recording") : new(Readiness.Ready, "planned from a recording");
-        public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir, IProgress<string>? log, CancellationToken ct, bool maximum = false)
+        public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir, IProgress<string>? log, CancellationToken ct, bool maximum = false, bool recordedOnly = false)
         {
             BuiltWith = recording == null ? null : PsoDb.Read(recording.DbPath).Select(r => r.Key).ToList();
-            return Inner.Build(game, engine, index, recording, caps, outDir, log, ct, maximum);
+            return Inner.Build(game, engine, index, recording, caps, outDir, log, ct, maximum, recordedOnly);
         }
         public void Materialize(Plan plan, Game game, EngineInfo engine, IEngineReader reader, Recording? recording, string workDir, CancellationToken ct) =>
             Inner.Materialize(plan, game, engine, reader, recording, workDir, ct);
@@ -13077,7 +13079,7 @@ public partial class AppTests : IDisposable
         Func<Recording?, PlanStats>? statsFor = null, Action? onBuild = null) : IPlanner
     {
         public PlanCheck Check(Game game, EngineInfo engine, Recording? recording, VendorCaps caps) => new(Readiness.Ready, "synthesized templates");
-        public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir, IProgress<string>? log, CancellationToken ct, bool maximum = false)
+        public Plan Build(Game game, EngineInfo engine, ShaderIndex index, Recording? recording, VendorCaps caps, string outDir, IProgress<string>? log, CancellationToken ct, bool maximum = false, bool recordedOnly = false)
         {
             var file = Path.Combine(outDir, "plan.bin");
             Directory.CreateDirectory(outDir);

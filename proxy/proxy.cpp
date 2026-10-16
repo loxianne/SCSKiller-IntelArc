@@ -33,7 +33,7 @@
 #include <psapi.h>
 #include <share.h>
 #include <d3d12.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <bcrypt.h>
 #include <io.h>
 #include <algorithm>
@@ -97,6 +97,8 @@ static std::wstring g_dir;
 static bool g_warm;
 static int g_threads;
 static FILE *g_db, *g_log, *g_csv;
+static std::atomic<bool> g_csv_dirty{false};
+static uint32_t g_vendor_id = 0;
 static const auto g_t0 = std::chrono::steady_clock::now();
 static std::mutex g_mx;                                      // ponytail: one lock for db/csv/stats, PSO creation dwarfs it
 static HashSet g_blobs_on_disk, g_known /*keys in db at start*/, g_keys /*all keys written*/;
@@ -753,6 +755,7 @@ static void write_stream(Writer& w, const D3D12_PIPELINE_STATE_STREAM_DESC& d) {
 
 static D3D12_PIPELINE_STATE_STREAM_DESC read_stream(Reader& r, std::vector<uint64_t>& buf) {
     size_t pos = 0;
+    buf.clear();
     for (uint32_t i = 0, n = r.count(); i < n && r.ok; ++i) {
         uint32_t t = r.u32();
         if ((r.so_decl = t == kSoDecl)) t = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT;
@@ -761,6 +764,7 @@ static D3D12_PIPELINE_STATE_STREAM_DESC read_stream(Reader& r, std::vector<uint6
         size_t in = align(pos + 4, s.align), end = align(in + s.size, sizeof(void*));
         buf.resize(end / 8);
         auto b = (uint8_t*)buf.data();
+        memset(b + pos, 0, end - pos);
         memcpy(b + pos, &t, 4);
         io_sub(r, t, b + in);
         pos = end;
@@ -1294,8 +1298,9 @@ static void note(Writer& w, double ms, bool lib, double pre_ms) {
         double own = pre_ms + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - n0).count();
         fprintf(g_csv, "%.1f,%c,%d,%d,%.3f,%s,%.3f,%lu,%d\n", t_ret, lib ? w.tag | 0x20 : w.tag, (int)known, (int)tknown, ms, hex(k).data(), own,
                 GetCurrentThreadId(), (int)t_presenting);
+        g_csv_dirty.store(true, std::memory_order_relaxed);
+        if (g_creates % 250 == 0) fflush(g_csv);  // batch flush periodically; presents flush each frame
     }
-    if (g_csv) fflush(g_csv);  // a crash or hard exit must not lose the timings
     if (g_creates % 500 == 0) {
         logf("creates=%llu (library loads %llu) known=%llu tuple_known=%llu | slow: known=%llu tuple_only=%llu unknown=%llu | repeats=%llu slow=%llu | unsupported=%llu db=%zu nvapi_state=%llu",
              g_creates, g_lib_loads, g_known_hits, g_tuple_hits, g_slow_known, g_slow_tuple, g_slow_unknown, g_repeats, g_slow_repeats, g_unsupported, g_keys.size(), g_nv_creates);
@@ -1450,11 +1455,29 @@ static std::vector<size_t> g_alone;             // in flight when an earlier pro
 static std::vector<size_t> g_blamed, g_alone_next;
 static std::string g_crash_json, g_alone_json;  // SCSKiller_Crashes
 static size_t g_remove_item = SIZE_MAX;         // SCSKILLER_WARM_REMOVE=<item> (development): its create removes the device first
+static const char* device_removed_reason_str(HRESULT r) {
+    switch (r) {
+        case DXGI_ERROR_DEVICE_HUNG: return "DXGI_ERROR_DEVICE_HUNG (TDR timeout / GPU hang)";
+        case DXGI_ERROR_DEVICE_RESET: return "DXGI_ERROR_DEVICE_RESET (Hardware page fault or bad descriptor)";
+        case DXGI_ERROR_DEVICE_REMOVED: return "DXGI_ERROR_DEVICE_REMOVED (Physical removal or driver crash)";
+        case DXGI_ERROR_DRIVER_INTERNAL_ERROR: return "DXGI_ERROR_DRIVER_INTERNAL_ERROR (Compiler/UMD internal crash)";
+        case DXGI_ERROR_INVALID_CALL: return "DXGI_ERROR_INVALID_CALL (Invalid runtime state or parameters)";
+        case S_OK: return "S_OK";
+        default: return "UNKNOWN_REASON";
+    }
+}
+static void log_device_removed_reason(ID3D12Device* dev) {
+    if (!dev) return;
+    HRESULT r = dev->GetDeviceRemovedReason();
+    if (r == S_OK) return;
+    logf("error: GPU device removed! Reason 0x%08X: %s", (unsigned)r, device_removed_reason_str(r));
+}
+
 static bool removed() {
     if (g_removed) return true;
     HRESULT why = g_warm_dev ? g_warm_dev->GetDeviceRemovedReason() : S_OK;
     if (why == S_OK) return false;
-    if (!g_removed.exchange(true)) logf("warm: the device was removed (reason 0x%08x): the replay stops, a new process goes on", (unsigned)why);
+    if (!g_removed.exchange(true)) logf("warm: the device was removed (reason 0x%08x: %s): the replay stops, a new process goes on", (unsigned)why, device_removed_reason_str(why));
     return true;
 }
 
@@ -2229,6 +2252,7 @@ template <class F> static HRESULT timed_create(ID3D12Device* dev, void** pp, Wri
     // a chained mod's create reaches hk_*_below, whose recording is ours, not the driver's: proxy_ms, not ms
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() - t_below_ms;
     if (SUCCEEDED(hr)) note(w, ms, lib, std::chrono::duration<double, std::milli>(t0 - w.t0).count() + t_below_ms);  // a failed library load is a miss: the game creates it next
+    else if (dev && (hr == DXGI_ERROR_DEVICE_REMOVED || dev->GetDeviceRemovedReason() != S_OK)) log_device_removed_reason(dev);
     t_in = false;
     return hr;
 }
@@ -2523,6 +2547,7 @@ static void* hk_nv_qi(uint32_t id) {  // which NVAPI functions the process uses,
 }
 
 static void nv_hooks() {
+    if (g_vendor_id == 0x8086) return;  // Intel Arc: skip NVAPI hooks
     HMODULE m = LoadLibraryW(L"nvapi64.dll");  // NVIDIA only; the game may load it later, the same module then
     auto qi = m ? (void* (*)(uint32_t))GetProcAddress(m, "nvapi_QueryInterface") : nullptr;
     if (!qi) return;
@@ -2699,6 +2724,17 @@ template <class F> static HRESULT timed_present(void* sc, UINT flags, F&& call) 
     int64_t own = (b.QuadPart - a.QuadPart) + (d.QuadPart - c.QuadPart);
     g_hook_ticks += own, ++g_presents;
     for (int64_t m = g_hook_max; own > m && !g_hook_max.compare_exchange_weak(m, own);) {}
+    if (g_csv_dirty.exchange(false, std::memory_order_acq_rel)) {
+        std::lock_guard l(g_mx);
+        if (g_csv) fflush(g_csv);
+    }
+    if (FAILED(hr) && (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET) && sc) {
+        ID3D12Device* dev = nullptr;
+        if (SUCCEEDED(((IDXGISwapChain*)sc)->GetDevice(IID_PPV_ARGS(&dev)))) {
+            log_device_removed_reason(dev);
+            dev->Release();
+        }
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE hk_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
@@ -2995,6 +3031,39 @@ static ID3D12Device* unwrapped(IUnknown* unk) {
     return real;
 }
 
+static uint32_t detect_vendor_id(IUnknown* dev_unk, IUnknown* adapter_unk) {
+    if (adapter_unk) {
+        IDXGIAdapter* ad = nullptr;
+        if (SUCCEEDED(adapter_unk->QueryInterface(IID_PPV_ARGS(&ad)))) {
+            DXGI_ADAPTER_DESC desc{};
+            HRESULT dhr = ad->GetDesc(&desc);
+            ad->Release();
+            if (SUCCEEDED(dhr)) return desc.VendorId;
+        }
+    }
+    ID3D12Device* dev = nullptr;
+    if (dev_unk && SUCCEEDED(dev_unk->QueryInterface(IID_PPV_ARGS(&dev)))) {
+        LUID luid = dev->GetAdapterLuid();
+        dev->Release();
+        HMODULE m = GetModuleHandleW(L"dxgi.dll");
+        if (!m) m = LoadLibraryW(L"dxgi.dll");
+        auto create_fn = m ? (decltype(&CreateDXGIFactory1))GetProcAddress(m, "CreateDXGIFactory1") : nullptr;
+        IDXGIFactory4* f4 = nullptr;
+        if (create_fn && SUCCEEDED(create_fn(IID_PPV_ARGS(&f4)))) {
+            IDXGIAdapter* ad = nullptr;
+            if (SUCCEEDED(f4->EnumAdapterByLuid(luid, IID_PPV_ARGS(&ad)))) {
+                DXGI_ADAPTER_DESC desc{};
+                HRESULT dhr = ad->GetDesc(&desc);
+                ad->Release();
+                f4->Release();
+                if (SUCCEEDED(dhr)) return desc.VendorId;
+            }
+            f4->Release();
+        }
+    }
+    return 0;
+}
+
 // Every device the game gets, however it asked for one: the hooks, once per vtable.
 // Once per device: what besides the PSO desc could change what the driver compiles (experimental features, device flags,
 // NVIDIA Aftermath, whose shader debug info and error reporting change the compiled code).
@@ -3016,13 +3085,18 @@ static void log_device(IUnknown* unk) {
         feats = b + feats;
         cfg->Release();
     } else feats = "no device configuration (a runtime before Agility 1.610)";
-    logf("device: %s; NVIDIA Aftermath %s", feats.c_str(), GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll") ? "loaded" : "not loaded");
-    hook_aftermath();   // a game initializes it on the device it just created
+    if (g_vendor_id == 0x8086) {
+        logf("device: %s; Intel Arc GPU (VendorId 0x8086) - bypassing NVIDIA Aftermath", feats.c_str());
+    } else {
+        logf("device: %s; NVIDIA Aftermath %s", feats.c_str(), GetModuleHandleW(L"GFSDK_Aftermath_Lib.x64.dll") ? "loaded" : "not loaded");
+        hook_aftermath();   // a game initializes it on the device it just created
+    }
 }
 
 static HRESULT device_created(HRESULT hr, IUnknown* adapter, D3D_FEATURE_LEVEL fl, void** pp) {
     if (FAILED(hr) || !pp || !*pp || !admitted()) return hr;
     pin_self();
+    if (!g_vendor_id) g_vendor_id = detect_vendor_id((IUnknown*)*pp, adapter);
     install_hooks((IUnknown*)*pp);
     log_device((IUnknown*)*pp);
     if (g_next) {
@@ -3041,11 +3115,28 @@ static HRESULT device_created(HRESULT hr, IUnknown* adapter, D3D_FEATURE_LEVEL f
 extern "C" HRESULT WINAPI Proxy_D3D12CreateDevice(IUnknown* adapter, D3D_FEATURE_LEVEL fl, REFIID riid, void** pp) {
     static std::once_flag once;
     std::call_once(once, [] {
-        if (!(g_debug12 = GetEnvironmentVariableW(L"SCSKILLER_D3D12_DEBUG", nullptr, 0) > 0)) return;
-        ID3D12Debug* dbg = nullptr;
-        HRESULT dhr = ((decltype(&D3D12GetDebugInterface))real_D3D12GetDebugInterface)(IID_PPV_ARGS(&dbg));
-        if (SUCCEEDED(dhr)) dbg->EnableDebugLayer(), dbg->Release();
-        logf("d3d12 debug: %s (hr=0x%08x)", SUCCEEDED(dhr) ? "debug layer enabled" : "debug layer unavailable: install the Graphics Tools optional feature", (unsigned)dhr);
+        g_debug12 = GetEnvironmentVariableW(L"SCSKILLER_D3D12_DEBUG", nullptr, 0) > 0;
+        if (g_debug12) {
+            ID3D12Debug* dbg = nullptr;
+            HRESULT dhr = ((decltype(&D3D12GetDebugInterface))real_D3D12GetDebugInterface)(IID_PPV_ARGS(&dbg));
+            if (SUCCEEDED(dhr)) dbg->EnableDebugLayer(), dbg->Release();
+            logf("d3d12 debug: %s (hr=0x%08x)", SUCCEEDED(dhr) ? "debug layer enabled" : "debug layer unavailable: install the Graphics Tools optional feature", (unsigned)dhr);
+        }
+        bool dred_env = g_debug12 || GetEnvironmentVariableW(L"SCSKILLER_D3D12_DRED", nullptr, 0) > 0;
+        if (dred_env) {
+            ID3D12DeviceRemovedExtendedDataSettings1* dred = nullptr;
+            HRESULT r = ((decltype(&D3D12GetDebugInterface))real_D3D12GetDebugInterface)(IID_PPV_ARGS(&dred));
+            if (SUCCEEDED(r) && dred) {
+                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetWatsonDumpEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->Release();
+                logf("d3d12 dred: auto-breadcrumbs and page fault tracking enabled");
+            }
+        }
+        if (GetModuleHandleW(L"ShaderInjector.dll")) {
+            logf("warning: third-party injector ShaderInjector.dll detected in process; MinHook hook collisions with Steam Overlay may cause crashes");
+        }
     });
     return device_created(real_CreateDevice(adapter, fl, riid, pp), adapter, fl, pp);
 }

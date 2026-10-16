@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using SCSKiller.Core;
 using SCSKiller.Core.App;
+using SCSKiller.Core.Planning;
 using SCSKiller.Core.Vendors;
 using Xunit;
 
@@ -24,7 +26,7 @@ public class IntelVendorTests
         Assert.False(backend.Caps.PerStageCache);
         Assert.Equal(RtCacheGranularity.WholeObject, backend.Caps.RtCacheGranularity);
         Assert.NotNull(backend.AppCache);
-        Assert.Equal(new CacheLimit(null, false), backend.GetCacheLimit());
+        Assert.Equal(new CacheLimit(IntelBackend.ContainerCeilingBytes, false), backend.GetCacheLimit());
         Assert.Throws<NotSupportedException>(() => backend.SetCacheLimit(new CacheLimit(100, false)));
     }
 
@@ -225,6 +227,143 @@ public class IntelVendorTests
         finally
         {
             if (File.Exists(tempFile)) File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public void Intel_LargestContainerBytes_finds_max_container_file()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "intel-container-test-" + Guid.NewGuid().ToString("N")[..8]);
+        var d3ds = Path.Combine(tempDir, "D3DSCache");
+        var intel = Path.Combine(tempDir, "Intel", "ShaderCache");
+        Directory.CreateDirectory(intel);
+
+        try
+        {
+            File.WriteAllBytes(Path.Combine(intel, "container_small"), new byte[100]);
+            File.WriteAllBytes(Path.Combine(intel, "container_large"), new byte[5000]);
+
+            var cache = new IntelAppCache(d3ds, intel);
+            Assert.Equal(5000, cache.LargestContainerBytes());
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
+    }
+
+    [Fact]
+    public void Intel_plan_builder_cap_constant_is_safe_threshold()
+    {
+        Assert.Equal(35_000, Core.Planning.PlanBuilder.IntelMaxSpeculativePsos);
+    }
+
+    [Fact]
+    public void Hook_conflict_detects_ShaderInjector_dll()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "hook-conflict-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            Assert.Null(ScsKiller.DetectHookConflict(tempDir));
+
+            var injectorDll = Path.Combine(tempDir, "ShaderInjector.dll");
+            File.WriteAllBytes(injectorDll, [1, 2, 3]);
+
+            var conflict = ScsKiller.DetectHookConflict(tempDir);
+            Assert.NotNull(conflict);
+            Assert.Contains("ShaderInjector.dll detected", conflict);
+            Assert.Contains("EXCEPTION_STACK_OVERFLOW", conflict);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
+    }
+
+    [Fact]
+    public void ChainBlocker_detects_ShaderInjector_and_MinHook()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "chain-blocker-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var fakeMod = Path.Combine(tempDir, "d3d12.dll");
+            // Write simulated DLL containing MinHook pattern
+            var content = System.Text.Encoding.ASCII.GetBytes("SomeHeader_MH_Initialize_SomeTrailer");
+            File.WriteAllBytes(fakeMod, content);
+
+            var blocker = ScsKiller.ChainBlocker(fakeMod);
+            Assert.NotNull(blocker);
+            Assert.Contains("ShaderInjector", blocker);
+            Assert.Contains("MinHook", blocker);
+
+            Assert.Contains("ShaderInjector", ScsKiller.NotChainableReason("ShaderInjector"));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
+    }
+
+    [Fact]
+    public void Intel_cache_warning_thresholds()
+    {
+        long limit = IntelBackend.ContainerCeilingBytes; // 512 MB
+        long nearCapacity = (long)(0.92 * limit);
+        long safeCapacity = (long)(0.50 * limit);
+
+        // Near 90% threshold produces Intel-specific warning
+        var warnNear = ScsKiller.QueueCacheWarning([], nearCapacity, 0, limit, GpuVendor.Intel);
+        Assert.NotNull(warnNear);
+        Assert.Contains("Intel shader cache container is near its", warnNear);
+        Assert.Contains(">90%", warnNear);
+
+        // Safe capacity has no warning
+        var warnSafe = ScsKiller.QueueCacheWarning([], safeCapacity, 0, limit, GpuVendor.Intel);
+        Assert.Null(warnSafe);
+    }
+
+    [Fact]
+    public void Planner_RecordedOnly_skips_speculative_permutations()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "rec-only-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var a = new ShaderInfo(new string('a', 40), Stage.Compute, "cs_6_0", 0, new(0, 0, 0, 0), [], [], []);
+            var unseen = new ShaderInfo(new string('e', 40), Stage.Compute, "cs_6_0", 0, new(0, 1, 0, 0), [new("srv", 0, 0, 1)], [], []);
+            var index = new ShaderIndex("synthetic", ["PCD3D_SM6"], new[] { a, unseen }.ToDictionary(s => s.Sha1), [new ShaderMap("m", "Game", "PCD3D_SM6", [a.Sha1, unseen.Sha1])]);
+
+            var rsBlob = RootSig.Serialize(RootSig.Build(RootSig.Rule.Ff7, new Dictionary<Stage, ShaderInfo> { [Stage.Compute] = a }, true), RootSig.StaticSamplers(RootSig.Rule.Ff7).ToArray());
+            var rsSha = PsoDb.Hex(SHA1.HashData(rsBlob));
+            var dbPath = Path.Combine(dir, "rec.db");
+            using (var f = File.Create(dbPath))
+            {
+                PsoDb.WriteBlob(f, rsSha, rsBlob);
+                PsoDb.Write(f, 'C', PsoDb.Compute(rsSha, a.Sha1));
+            }
+
+            var game = new Game("steam:2909400", "FF7 Rebirth", Store.Steam, @"C:\Fake", @"C:\Fake\ff7.exe");
+            var ue426 = new EngineInfo("Unreal", "4.26", "GAME_FinalFantasy7Rebirth", "D3D12", false, null);
+            var rec = new Recording(dbPath);
+            var planner = new Planner();
+
+            var caps = new IntelBackend(IntelGpu()).Caps;
+            var defaultPlan = planner.Build(game, ue426, index, rec, caps, Path.Combine(dir, "default"), null, CancellationToken.None);
+            var maxPlan = planner.Build(game, ue426, index, rec, caps, Path.Combine(dir, "max"), null, CancellationToken.None, maximum: true);
+
+            // Default on Intel with a recording: automatically recorded-only (0 generated permutations)
+            Assert.Equal(0, defaultPlan.Stats.Generated);
+            Assert.True(defaultPlan.Stats.Recorded > 0);
+
+            // Maximum mode explicitly requested: allows speculative generation
+            Assert.True(maxPlan.Stats.Generated > 0);
+            Assert.Equal(defaultPlan.Stats.Recorded, maxPlan.Stats.Recorded);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
         }
     }
 }

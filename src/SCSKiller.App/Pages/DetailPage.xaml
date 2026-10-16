@@ -1,4 +1,4 @@
-﻿<Page
+<Page
     x:Class="SCSKiller.App.Pages.DetailPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -205,6 +205,8 @@
                                 <StackPanel Spacing="2" Visibility="{x:Bind Vm.HasDiskValue, Mode=OneWay}">
                                     <TextBlock Text="{x:Bind Vm.DiskLabel, Mode=OneWay}" Style="{StaticResource Secondary}" />
                                     <TextBlock Text="{x:Bind Vm.DiskValue, Mode=OneWay}" Style="{StaticResource StatValue}" />
+                                    <ProgressBar Value="{x:Bind Vm.IntelContainerPercent, Mode=OneWay}" Maximum="100" Margin="0,4,0,0" Height="4"
+                                                 Visibility="{x:Bind Vm.IsIntelGpu, Mode=OneWay}" AutomationProperties.Name="Intel container capacity" />
                                 </StackPanel>
                                 <StackPanel Spacing="2" Visibility="{x:Bind Vm.HasSession, Mode=OneWay}">
                                     <TextBlock Text="{x:Bind Vm.StuttersLabel, Mode=OneWay}" Style="{StaticResource Secondary}" />

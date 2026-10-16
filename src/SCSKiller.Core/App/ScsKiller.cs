@@ -33,7 +33,8 @@ public sealed partial class ScsKiller : IScsKiller
     /// On AMD the driver's cache can't hold it all.</summary>
     public static string? LargeCompileWarning(IEnumerable<(long Growth, long Estimate)> queue, GpuVendor vendor) =>
         LargeCompileGb(queue) is { } gb ? $"This compile adds about {gb:0} GB. {LargeCacheCost}"
-            + (vendor == GpuVendor.Amd ? $" It's more than the AMD driver's {App.Format.Bytes(AmdAppCache.DxcCacheCap)} cache can hold." : "") : null;
+            + (vendor == GpuVendor.Amd ? $" It's more than the AMD driver's {App.Format.Bytes(AmdAppCache.DxcCacheCap)} cache can hold." : "")
+            + (vendor == GpuVendor.Intel ? $" It's more than the Intel driver's {App.Format.Bytes(Vendors.IntelBackend.ContainerCeilingBytes)} cache container can hold." : "") : null;
 
     const string LargeCacheCost = "Very large caches can make the game start slower and use more memory.";
 
@@ -48,6 +49,8 @@ public sealed partial class ScsKiller : IScsKiller
         if (limit is not { } max) return LargeCompileWarning(queue, vendor);
         if (LargeCompileGb(queue) is { } gb && usage + planned > max)
             return $"This compile adds about {gb:0} GB and takes the cache past your {App.Format.Bytes(max)} limit, so older games may be evicted. {LargeCacheCost}";
+        if (vendor == GpuVendor.Intel && (usage + planned > 0.9 * max || usage > 0.9 * max))
+            return $"After this queue the Intel shader cache container is near its {App.Format.Bytes(max)} ceiling (>90%), which may cause driver LRU stalls.";
         return LargeCompileWarning(queue, vendor)
             ?? (planned > 0 && usage + planned > 0.9 * max ? $"After this queue the cache is close to its {App.Format.Bytes(max)} limit, older games may be evicted." : null);
     }
@@ -262,6 +265,7 @@ public sealed partial class ScsKiller : IScsKiller
     /// background runs regardless.</summary>
     public bool Background { get; set; }
     public int? ThreadsOverride { get; set; }
+    public bool RecordedOnlyOverride { get; set; }
     public IProgress<string>? Log { get; set; }
     /// <summary>After a scan, queue a "when idle" plan rebuild (no warm) for each warmed game whose plan an older planner
     /// built (<see cref="Planner.Version"/>): it tells whether the new planner compiles anything the warm didn't. The app
@@ -1126,8 +1130,14 @@ public sealed partial class ScsKiller : IScsKiller
     /// <summary>AMD's careful compile (<see cref="CarefulCompile"/>): the thread cap of its recorded passes, null on other
     /// vendors. Measured on AMD (Tiny Tina's Wonderlands' recording in sibling passes, the first launch after the warm,
     /// two runs each): 4 threads median 3.4 ms, 44% of the creates under 2 ms; 2 threads 7.3 ms, 36%.</summary>
-    public static int? CarefulThreads(GpuVendor vendor) => vendor == GpuVendor.Amd ? AmdCarefulThreads : null;
+    public static int? CarefulThreads(GpuVendor vendor) => vendor switch
+    {
+        GpuVendor.Amd => AmdCarefulThreads,
+        GpuVendor.Intel => IntelCarefulThreads,
+        _ => null,
+    };
     public const int AmdCarefulThreads = 4;
+    public const int IntelCarefulThreads = 4;
     /// <summary>A careful compile's rate for the recorded PSOs (AMD, 4 threads, sibling passes: the recording above, 18,115 PSOs
     /// in 271 s); the plan's other items at the game's fast rate.</summary>
     public const double DefaultCarefulPsoPerSecond = 67;
@@ -1876,7 +1886,7 @@ public sealed partial class ScsKiller : IScsKiller
     public void SetCarefulCompile(string gameId, bool on)
     {
         var s = Find(gameId);
-        if (CarefulThreads(Vendor.Vendor) == null) throw new InvalidOperationException($"the careful compile is for AMD drivers, not {Vendor.Gpu.Name}");
+        if (CarefulThreads(Vendor.Vendor) == null) throw new InvalidOperationException($"the careful compile is not supported on {Vendor.Gpu.Name}");
         lock (_lock)
             if (_current == gameId) throw new InvalidOperationException($"a compile of {s.Game.Name} is in progress");
         var rec = Store.LoadGame(gameId);
@@ -2968,10 +2978,22 @@ public sealed partial class ScsKiller : IScsKiller
 
     /// <summary>A mod's d3d12.dll in the recorder's place (or chained to it): null = none, or the user chose to record alongside
     /// it (<see cref="GameRecord.RecordAlongsideMod"/>) and it can be chained; else the skip reason. Turning the choice off
+    /// <summary>Detects known third-party hooking injectors (e.g. ShaderInjector) in the game directory that collide with Steam Overlay.</summary>
+    public static string? DetectHookConflict(string dir)
+    {
+        if (!Directory.Exists(dir)) return null;
+        if (File.Exists(Path.Combine(dir, "ShaderInjector.dll")))
+            return "ShaderInjector.dll detected in game directory: simultaneous MinHook hooking with Steam Overlay causes EXCEPTION_STACK_OVERFLOW crashes";
+        return null;
+    }
+
+    /// <summary>A mod's d3d12.dll in the recorder's place (or chained to it): null = none, or the user chose to record alongside
+    /// it (<see cref="GameRecord.RecordAlongsideMod"/>) and it can be chained; else the skip reason. Turning the choice off
     /// while chained gives a skip, so Reconcile removes the recorder and puts the mod back. Any d3d12.dll in an Xbox app
     /// game's package root loads before the exe's folder's: <see cref="SkipPackageD3D12"/>.</summary>
     static string? ModSkip(Game g, string dir, GameRecord rec, bool ours)
     {
+        if (DetectHookConflict(dir) is { } conflict) return conflict;
         if (ReShade.PackageRoot(g) is { } root && !root.Equals(GameFiles.DirKey(dir), StringComparison.OrdinalIgnoreCase)
             && File.Exists(Path.Combine(root, "d3d12.dll"))) return SkipPackageD3D12;
         var dll = Path.Combine(dir, "d3d12.dll");
@@ -2982,20 +3004,29 @@ public sealed partial class ScsKiller : IScsKiller
 
     /// <summary>Why a mod's d3d12.dll can't be chained (renamed to <see cref="ChainName"/>); null = it can. OptiScaler and
     /// Special K pick their role from their own file name, so renamed they'd stop working. vkd3d-proton (its own strings
-    /// name it): <see cref="SkipVulkanMod"/>.</summary>
+    /// name it): <see cref="SkipVulkanMod"/>. ShaderInjector uses MinHook inline hooking which collides with Steam Overlay.</summary>
     public static string? ChainBlocker(string dll)
     {
         string? export, product;
-        bool vkd3d;
+        bool vkd3d, shaderInjector;
         try
         {
             (export, product) = (Middleware.ExportName(dll), FileVersionInfo.GetVersionInfo(dll).ProductName);
-            vkd3d = File.ReadAllBytes(dll).AsSpan().IndexOf("vkd3d-proton"u8) >= 0;
+            var bytes = File.ReadAllBytes(dll);
+            var span = bytes.AsSpan();
+            vkd3d = span.IndexOf("vkd3d-proton"u8) >= 0;
+            shaderInjector = span.IndexOf("ShaderInjector"u8) >= 0 || span.IndexOf("MH_Initialize"u8) >= 0;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return $"{Path.GetFileName(dll)} can't be read"; }
         foreach (var n in new[] { export, product })
+        {
             if (n != null && new[] { "OptiScaler", "SpecialK", "Special K" }.Any(m => n.StartsWith(m, StringComparison.OrdinalIgnoreCase)))
                 return $"{n} picks its role from its file name";
+            if (n != null && n.StartsWith("ShaderInjector", StringComparison.OrdinalIgnoreCase))
+                return $"{n} uses inline hooking (MinHook): hook collision with Steam Overlay causes stack overflow crashes";
+        }
+        if (shaderInjector)
+            return "ShaderInjector (MinHook hook injector): simultaneous D3D12 hooking with Steam Overlay causes EXCEPTION_STACK_OVERFLOW crashes";
         return vkd3d ? SkipVulkanMod : null;
     }
 
@@ -3005,6 +3036,8 @@ public sealed partial class ScsKiller : IScsKiller
     public static string NotChainableReason(string? mod) =>
         mod?.StartsWith("OptiScaler", StringComparison.OrdinalIgnoreCase) == true
             ? "OptiScaler is installed as d3d12.dll, and renamed it stops working (it picks its role from its file name). To record alongside it, rename it to dxgi.dll (or winmm.dll or version.dll if a dxgi.dll is already there): OptiScaler supports those names"
+            : mod?.Contains("ShaderInjector", StringComparison.OrdinalIgnoreCase) == true
+            ? "ShaderInjector uses MinHook inline hooking: hook collision with Steam Overlay causes stack overflow crashes. Remove or disable ShaderInjector to play or record"
             : $"{mod ?? "another mod"} is installed as d3d12.dll, and the recorder can't run alongside it: renamed it stops working";
 
     /// <summary>What the game folder's d3d12.dll that isn't SCSKiller's (or the one chained to it) calls itself, for "Record
@@ -4374,12 +4407,13 @@ public sealed partial class ScsKiller : IScsKiller
             bool current = false;   // this rebuild found the warm still current: nothing to warm
             var shared = packs?.SharedFingerprint(game);   // before the build: a download during it must still re-plan
             var maps = MapsFingerprint(index);
-            if (PlanIsStale(id, rec, engine) || rec.PlanMaps != maps || (packs != null && packs.PackFingerprint(game, shared) != (rec.PlanMiddleware ?? "")))
+            bool wantRecordedOnly = RecordedOnlyOverride || (Vendor.Caps.Profile.StartsWith("intel") && (rec.RecordingImportedAt != null || rec.PlanCommunity != null || Prepared() != null));
+            if (PlanIsStale(id, rec, engine) || rec.PlanMaps != maps || (wantRecordedOnly && rec.Plan?.Stats.Generated > 0) || (packs != null && packs.PackFingerprint(game, shared) != (rec.PlanMiddleware ?? "")))
             {
                 Stage(QueueStage.Planning);
                 await Gate(id, ct);
                 rec.PlanPerStage = PerStagePlans;
-                rec.Plan = Lowered(checking, () => _planner.Build(game, engine, index, Prepared(), Vendor.Caps, Store.GameDir(id), Log, ct, Settings.MaximumPlans));
+                rec.Plan = Lowered(checking, () => _planner.Build(game, engine, index, Prepared(), Vendor.Caps, Store.GameDir(id), Log, ct, Settings.MaximumPlans, wantRecordedOnly));
                 (rec.PlanBuiltAt, rec.PlanVersion, rec.ResumeAt) = (DateTimeOffset.Now, Planner.Version, 0);
                 rec.PlanMaps = maps;
                 rec.PlanMiddleware = packs is null ? null : packs.SeededFingerprint(rec.Plan) ?? packs.PackFingerprint(game, shared);   // what the build read: it may have promoted into one
@@ -4669,7 +4703,8 @@ public sealed partial class ScsKiller : IScsKiller
 
     bool PlanIsStale(string id, GameRecord r, EngineInfo? e) => r.Plan is not { } p || !File.Exists(p.FilePath) || p.IndexContentHash != r.IndexContentHash
                                       || p.VendorProfile != Vendor.Caps.Profile || r.RecordingImportedAt > r.PlanBuiltAt
-                                      || r.PlanVersion != Planner.Version || r.PlanPerStage != PerStagePlans || r.PlanCommunity != CommunityInUse(id)?.Object || RtPlanCheck(r, e);
+                                      || r.PlanVersion != Planner.Version || r.PlanPerStage != PerStagePlans || r.PlanCommunity != CommunityInUse(id)?.Object || RtPlanCheck(r, e)
+                                      || (Vendor.Caps.Profile.StartsWith("intel") && (r.RecordingImportedAt != null || r.PlanCommunity != null) && r.Plan?.Stats.Generated > 0);
 
     /// <summary>Plans have each stage unit once: the vendor caches per stage and Maximum mode is off. A pairing plan warmed
     /// earlier already holds every unit, so going per-stage rebuilds the plan but needs no re-warm (see StaleReason).</summary>
